@@ -1,0 +1,12 @@
+
+# General
+.DS_Store
+*.log
+.vscode/
+.idea/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
