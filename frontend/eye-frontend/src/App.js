@@ -130,8 +130,9 @@ function App() {
   const [submitMessage, setSubmitMessage] = useState('');
   const [isExpandedImageModalOpen, setIsExpandedImageModalOpen] = useState(false); // New state for expanded image modal
   const [expandedImageInfo, setExpandedImageInfo] = useState(null); // Stores info of the image to expand
+  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false); // Track unsaved changes
 
-  const patientIdPrefix = "病人ID (Patient ID): ";
+  const patientIdPrefix = "病人索引 (Patient Index): ";
 
   const diseaseNames = {
     糖网: 'Diabetic Retinopathy',
@@ -146,51 +147,61 @@ function App() {
     正常: 'Normal',
   };
 
-  const fetchPatientData = useCallback(async (endpoint) => {
-    setLoading(true);
-    setError(null);
-    setPatientData(null);
-    setSelectedDisplayImages([]); // Clear previous selection
+  // Helper function to deep compare two objects
+  const isDataEqual = (a, b) => {
+    return JSON.stringify(a) === JSON.stringify(b);
+  };
+
+  const fetchPatientData = useCallback(async (endpoint, { skipIfUnsaved = false } = {}) => {
+    if (skipIfUnsaved && hasUnsavedChanges) return;
+    let willUpdate = false;
     try {
       const response = await fetch(`http://127.0.0.1:8000/api/patients/${endpoint}`);
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`);
       }
       const result = await response.json();
-      setPatientData(result);
-
-      // Initialize selectedDisplayImages
-      const uniqueImageTypes = {};
-      result.eye_images.forEach(img => {
-        if (!uniqueImageTypes[img.type]) {
-          uniqueImageTypes[img.type] = img.id;
+      // Only update if data is different and no unsaved changes
+      if (!hasUnsavedChanges && (!patientData || !isDataEqual(result, patientData))) {
+        willUpdate = true;
+        setLoading(true);
+        setPatientData(result);
+        // Initialize selectedDisplayImages
+        const uniqueImageTypes = {};
+        result.eye_images.forEach(img => {
+          if (!uniqueImageTypes[img.type]) {
+            uniqueImageTypes[img.type] = img.id;
+          }
+        });
+        let initialSelection = Object.values(uniqueImageTypes);
+        // Ensure there are exactly 4 images for display
+        while (initialSelection.length < 4 && result.eye_images.length > 0) {
+          // If less than 4 unique types, auto display the same kind ones if available
+          const availableImages = result.eye_images.filter(img => !initialSelection.includes(img.id));
+          if (availableImages.length > 0) {
+            initialSelection.push(availableImages[0].id);
+          } else {
+            // If no new images to add, break to prevent infinite loop for patients with <4 images
+            break;
+          }
         }
-      });
-
-      let initialSelection = Object.values(uniqueImageTypes);
-      // Ensure there are exactly 4 images for display
-      while (initialSelection.length < 4 && result.eye_images.length > 0) {
-        // If less than 4 unique types, auto display the same kind ones if available
-        const availableImages = result.eye_images.filter(img => !initialSelection.includes(img.id));
-        if (availableImages.length > 0) {
-          initialSelection.push(availableImages[0].id);
-        } else {
-          // If no new images to add, break to prevent infinite loop for patients with <4 images
-          break;
-        }
+        setSelectedDisplayImages(initialSelection.slice(0, 4));
       }
-      setSelectedDisplayImages(initialSelection.slice(0, 4));
-
     } catch (e) {
       console.error("Failed to fetch patient data:", e);
       setError(`Failed to load patient data: ${e.message}. Is the Python server running?`);
     } finally {
-      setLoading(false);
+      if (willUpdate) setLoading(false);
     }
-  }, []);
+  }, [hasUnsavedChanges, patientData]);
 
+  // Polling effect
   useEffect(() => {
-    fetchPatientData('current');
+    fetchPatientData('current'); // Initial fetch
+    const intervalId = setInterval(() => {
+      fetchPatientData('current', { skipIfUnsaved: true });
+    }, 5000); // Poll every 5 seconds
+    return () => clearInterval(intervalId);
   }, [fetchPatientData]);
 
   // Handler for changes to Image Type or Image Quality dropdowns
@@ -200,6 +211,7 @@ function App() {
       const updatedEyeImages = prevData.eye_images.map(img =>
         img.id === imageId ? { ...img, [field]: value } : img
       );
+      setHasUnsavedChanges(true);
       return { ...prevData, eye_images: updatedEyeImages };
     });
   };
@@ -211,8 +223,20 @@ function App() {
         ...newDiagnosisResults[eye],
         [disease]: !newDiagnosisResults[eye][disease]
       };
+      setHasUnsavedChanges(true);
       return { ...prevData, diagnosis_results: newDiagnosisResults };
     });
+  };
+
+  const handleReselectImages = (newSelectedIds) => {
+    setSelectedDisplayImages(newSelectedIds);
+    setHasUnsavedChanges(true);
+  };
+
+  const handleDiscardChanges = () => {
+    setSubmitMessage(''); // Clear any previous submit messages
+    setHasUnsavedChanges(false);
+    fetchPatientData('current'); // Reload original data for the current patient
   };
 
   const handleSubmitDiagnosis = async () => {
@@ -236,29 +260,20 @@ function App() {
       }
       const result = await response.json();
       setSubmitMessage(result.status);
+      setHasUnsavedChanges(false); // Reset unsaved changes after submit
+      fetchPatientData('current'); // Optionally refresh after submit
     } catch (e) {
       console.error("Failed to submit diagnosis:", e);
       setSubmitMessage(`Error submitting: ${e.message}`);
     } finally {
       setIsSubmitting(false);
-      // Optionally re-fetch current patient data to confirm save
-      // fetchPatientData('current');
     }
-  };
-
-  const handleReselectImages = (newSelectedIds) => {
-    setSelectedDisplayImages(newSelectedIds);
   };
 
   const getDisplayedImageInfo = (imageId) => {
     // Look up the image info from the current patientData.eye_images
     // This allows the dropdowns to reflect local state changes
     return patientData?.eye_images.find(img => img.id === imageId);
-  };
-
-  const handleDiscardChanges = () => {
-    setSubmitMessage(''); // Clear any previous submit messages
-    fetchPatientData('current'); // Reload original data for the current patient
   };
 
   // Handler to open the expanded image modal
