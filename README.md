@@ -18,6 +18,7 @@ keep the terminal open for FastAPI to run on `http://127.0.0.1:8000`.
 
 ```bash
 cd frontend/eye-frontend
+npm install
 npm start
 ```
 
