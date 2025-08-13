@@ -1,13 +1,16 @@
 # main.py
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+
 from base64 import b64encode
 import io
 from PIL import Image, ImageDraw, ImageFont
 import random
-from typing import List, Dict, Any
+from typing import List, Dict
 import threading # Import threading for Lock
+
+from datatype import ImageInfo, EyeDiagnosis, PatientData, SubmitDiagnosisRequest, EyePrediction, EyePredictionThresholds
+from patientdataio import load_batch_patient_data, create_batch_dummy_patient_data
 
 app = FastAPI()
 
@@ -26,120 +29,23 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- Data Models (Pydantic) ---
-class ImageInfo(BaseModel):
-    id: str
-    type: str  # e.g., '左眼CFP', '右眼CFP', '左眼外眼照', '右眼外眼照'
-    quality: str # e.g., 'Good', 'Usable', 'Bad'
-    base64_data: str # Base64 encoded image
-
-class EyeDiagnosis(BaseModel):
-    # Dictionary where keys are disease names and values are boolean (detected/not detected)
-    糖网: bool = False
-    青光眼: bool = False
-    AMD: bool = False
-    病理性近视: bool = False
-    RVO: bool = False
-    RAO: bool = False
-    视网膜脱离: bool = False
-    其它黄斑病变: bool = False
-    其它眼病变: bool = False
-    正常: bool = False # 'Normal'
-
-class PatientData(BaseModel):
-    patient_id: str
-    eye_images: List[ImageInfo]
-    diagnosis_results: Dict[str, EyeDiagnosis] # 'left_eye', 'right_eye'
-
-class SubmitDiagnosisRequest(BaseModel):
-    patient_id: str
-    diagnosis_results: Dict[str, EyeDiagnosis]
-    eye_images: List[ImageInfo]
-
 # --- Simulated Data Storage (In-memory) ---
 patients_data: Dict[str, PatientData] = {}
 patient_ids_order: List[str] = []
 current_patient_index = 0 # This will now point to the "latest" patient added or navigated to
+
 patient_data_lock = threading.Lock() # Lock for thread-safe access to global data
 
-# --- Helper Functions (Backend-specific) ---
-def generate_random_image_base64_backend(text: str, color: tuple) -> str:
-    """Generates a simple colored square image with text and returns its Base64 string.
-       For backend use, keeping original smaller size."""
-    width, height = 200, 200 # Keeping smaller for real-scenario simulation
-    img = Image.new('RGB', (width, height), color=color)
-    draw = ImageDraw.Draw(img)
-    try:
-        font = ImageFont.truetype("arial.ttf", 20)
-    except IOError:
-        font = ImageFont.load_default()
-    
-    text_color = (255, 255, 255) if sum(color) < 300 else (0, 0, 0)
-    
-    bbox = draw.textbbox((0, 0), text, font=font)
-    text_width, text_height = bbox[2] - bbox[0], bbox[3] - bbox[1]
-    text_x = (width - text_width) / 2
-    text_y = (height - text_height) / 2
-
-    draw.text((text_x, text_y), text, font=font, fill=text_color)
-    
-    buffered = io.BytesIO()
-    img.save(buffered, format="PNG")
-    return b64encode(buffered.getvalue()).decode("utf-8")
-
-def create_initial_dummy_patient_data_batch(num_patients: int = 5) -> None:
-    """Creates an initial batch of dummy data on server startup."""
-    global patients_data, patient_ids_order, current_patient_index
-    with patient_data_lock:
-        patients_data.clear()
-        patient_ids_order.clear()
-        
-        for i in range(num_patients):
-            patient_id = f"startup_patient_{random.randint(1000, 9999)}"
-            eye_images: List[ImageInfo] = []
-            image_types = ['左眼CFP', '右眼CFP', '左眼外眼照', '右眼外眼照', 'OCT', 'FFA']
-            image_qualities = ['Good', 'Usable', 'Bad']
-            colors = [(200, 50, 50), (50, 200, 50), (50, 50, 200), (200, 200, 50), (50, 200, 200), (200, 50, 200)]
-
-            for img_idx in range(6): # Each patient gets 6 dummy images
-                img_type = random.choice(image_types)
-                img_quality = random.choice(image_qualities)
-                img_color = random.choice(colors)
-                base64_data = generate_random_image_base64_backend(f"{img_type}\nQ:{img_quality}\nImg {img_idx+1}", img_color)
-                eye_images.append(ImageInfo(
-                    id=f"img_{patient_id}_{img_idx}",
-                    type=img_type,
-                    quality=img_quality,
-                    base64_data=base64_data
-                ))
-            
-            # Simulate random diagnosis results
-            left_diagnosis = EyeDiagnosis(**{
-                disease: random.choice([True, False]) for disease in EyeDiagnosis.__fields__.keys()
-            })
-            right_diagnosis = EyeDiagnosis(**{
-                disease: random.choice([True, False]) for disease in EyeDiagnosis.__fields__.keys()
-            })
-            
-            new_patient = PatientData(
-                patient_id=patient_id,
-                eye_images=eye_images,
-                diagnosis_results={
-                    "left_eye": left_diagnosis,
-                    "right_eye": right_diagnosis
-                }
-            )
-            patients_data[new_patient.patient_id] = new_patient
-            patient_ids_order.append(new_patient.patient_id)
-        
-        # Set the current patient to the first one generated initially
-        if patient_ids_order:
-            current_patient_index = 0
-        print(f"Initialized {len(patients_data)} dummy patients on startup.")
-        print(f"Patient IDs: {patient_ids_order}")
 
 # Initialize dummy data on server startup
-create_initial_dummy_patient_data_batch()
+# initial_patients = create_batch_dummy_patient_data()
+initial_patients = load_batch_patient_data()
+with patient_data_lock:
+    for patient in initial_patients:
+        patients_data[patient.patient_id] = patient
+        patient_ids_order.append(patient.patient_id)
+    if patient_ids_order:
+        current_patient_index = 0
 
 # --- API Endpoints ---
 @app.get("/api/patients/current")
@@ -186,10 +92,17 @@ async def submit_diagnosis(request: SubmitDiagnosisRequest):
     Receives updated diagnosis results and image info from the frontend and "saves" them.
     """
     with patient_data_lock:
-        print(f"Received diagnosis and image info submission for patient: {request.patient_id}")
-        if request.patient_id in patients_data:
-            patients_data[request.patient_id].diagnosis_results = request.diagnosis_results
-            patients_data[request.patient_id].eye_images = request.eye_images
+        print(f"Received diagnosis submission for patient: {request.patient_id}")
+        patient = patients_data.get(request.patient_id)
+        if patient:
+            patient.diagnosis_results = request.diagnosis_results
+            # Update image type/quality if provided
+            if hasattr(request, "image_updates") and request.image_updates:
+                for update_img in request.image_updates:
+                    for img in patient.eye_images:
+                        if img.id == update_img["id"]:
+                            img.type = update_img["type"]
+                            img.quality = update_img["quality"]
             print(f"Diagnosis and image info updated for {request.patient_id}")
             return {"status": "Diagnosis and image info submitted successfully!"}
         else:

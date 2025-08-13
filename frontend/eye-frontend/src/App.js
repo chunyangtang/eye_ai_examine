@@ -97,8 +97,7 @@ const ExpandedImageModal = ({ isOpen, onClose, imageInfo }) => {
 
   return (
     <div className="fixed inset-0 bg-gray-800 bg-opacity-75 flex justify-center items-center z-50 p-4">
-      {/* Change the w- and h- here to adjust the expanded window size */}
-      <div className="bg-white rounded-lg shadow-xl w-[90vmin] h-[90vmin] flex flex-col"> {/* Set modal to be square using vmin */}
+      <div className="bg-white rounded-lg shadow-xl w-[90vmin] h-[90vmin] flex flex-col">
         <div className="flex justify-between items-center p-4 border-b border-gray-200 flex-shrink-0">
           <h2 className="text-xl font-bold text-gray-800">{imageInfo.type} - {imageInfo.quality}</h2>
           <IconButton onClick={onClose} className="bg-transparent hover:bg-gray-100 p-1">
@@ -111,7 +110,8 @@ const ExpandedImageModal = ({ isOpen, onClose, imageInfo }) => {
           <img
             src={`data:image/png;base64,${imageInfo.base64_data}`}
             alt={imageInfo.type}
-            className="w-full h-full object-fill" // Keep object-fill to force image to fill the square modal
+            className="w-full h-full object-contain"
+            style={{ maxWidth: '100%', maxHeight: '100%', width: '100%', height: '100%', display: 'block', margin: 'auto' }}
           />
         </div>
       </div>
@@ -135,17 +135,36 @@ function App() {
   const patientIdPrefix = "病人索引 (Patient Index): ";
 
   const diseaseNames = {
-    糖网: 'Diabetic Retinopathy',
     青光眼: 'Glaucoma',
+    糖网: 'Diabetic Retinopathy',
     AMD: 'AMD',
     病理性近视: 'Pathological Myopia',
     RVO: 'RVO',
     RAO: 'RAO',
     视网膜脱离: 'Retinal Detachment',
+    其它视网膜病: 'Other Retinal Diseases',
     其它黄斑病变: 'Other Macular Diseases',
-    其它眼病变: 'Other Eye Diseases',
+    白内障: 'Cataract',
     正常: 'Normal',
   };
+
+  // Order of diseases for display (match backend model fields)
+  const diseaseOrder = [
+    '青光眼','糖网','AMD','病理性近视','RVO','RAO','视网膜脱离','其它视网膜病','其它黄斑病变','白内障','正常'
+  ];
+
+  // Map raw probability p (0-1) to visual width so that threshold t maps to 0.5
+  // Linear piecewise: [0,t] -> [0,0.5], [t,1] -> [0.5,1]. This keeps monotonicity.
+  const mapProbToWidth = (p, t) => {
+    if (t <= 0) return p; // avoid divide by zero
+    if (t >= 1) return 1; // degenerate
+    if (p <= t) {
+      return (p / (t * 2));
+    }
+    return 0.5 + (p - t) / (2 * (1 - t));
+  };
+
+  const formatProb = (p) => (p === undefined || p === null ? '--' : p.toFixed(2));
 
   // Helper function to deep compare two objects
   const isDataEqual = (a, b) => {
@@ -239,9 +258,9 @@ function App() {
     fetchPatientData('current'); // Reload original data for the current patient
   };
 
+  // Submit both diagnosis and image info in one request
   const handleSubmitDiagnosis = async () => {
     if (!patientData) return;
-
     setIsSubmitting(true);
     setSubmitMessage('');
     try {
@@ -251,19 +270,18 @@ function App() {
         body: JSON.stringify({
           patient_id: patientData.patient_id,
           diagnosis_results: patientData.diagnosis_results,
-          eye_images: patientData.eye_images, // UPDATED: Submit image type/quality changes
+          image_updates: patientData.eye_images.map(({id, type, quality}) => ({id, type, quality}))
         }),
       });
-
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`);
       }
       const result = await response.json();
       setSubmitMessage(result.status);
-      setHasUnsavedChanges(false); // Reset unsaved changes after submit
-      fetchPatientData('current'); // Optionally refresh after submit
+      setHasUnsavedChanges(false);
+      fetchPatientData('current');
     } catch (e) {
-      console.error("Failed to submit diagnosis:", e);
+      console.error('Failed to submit diagnosis:', e);
       setSubmitMessage(`Error submitting: ${e.message}`);
     } finally {
       setIsSubmitting(false);
@@ -305,7 +323,7 @@ function App() {
             }}
           />
           <h1 className="text-xl md:text-2xl font-extrabold text-gray-900 tracking-tight whitespace-nowrap">
-            Tsinghua BBNC AI眼科辅助诊断系统
+            AI Eye Clinic 辅助诊断系统
           </h1>
         </div>
       </header>
@@ -387,15 +405,112 @@ function App() {
               </IconButton>
             </div>
 
-            {/* Image Details (Type and Quality) - Single Horizontal Line Layout */}
-            <div className="mb-10 p-5 rounded-lg shadow-sm border border-gray-100 bg-white">
-              <h3 className="text-lg font-semibold mb-4 text-gray-700 text-center">影像详情 (Image Details)</h3>
+            {/* Prediction Probability Bars Section */}
+            <div className="mb-8 p-5 rounded-lg shadow-sm border border-gray-100 bg-white">
+              <h3 className="text-lg font-semibold mb-3 text-gray-700 text-center">AI预测概率 (Model Prediction Probabilities)</h3>
+              <p className="text-xs text-gray-500 mb-4 text-center">彩条长度按阈值重新映射: 阈值位于条形中点 (50%)，左侧表示低于阈值，右侧高于阈值。</p>
+              <div className="overflow-x-auto">
+                <table className="min-w-full table-fixed text-xs md:text-sm">
+                  <thead>
+                    <tr>
+                      <th className="w-28 p-2 text-left text-gray-600 font-medium">疾病 (Disease)</th>
+                      <th className="p-2 text-center text-gray-600 font-medium">左眼 (Left)</th>
+                      <th className="p-2 text-center text-gray-600 font-medium">右眼 (Right)</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {diseaseOrder.map(dk => {
+                      const thresholds = patientData?.prediction_thresholds || {};
+                      const t = thresholds[dk] ?? 0.5; // fallback
+                      const leftProb = patientData?.prediction_results?.left_eye?.[dk] ?? 0.0;
+                      const rightProb = patientData?.prediction_results?.right_eye?.[dk] ?? 0.0;
+                      const leftWidthRaw = mapProbToWidth(leftProb, t) * 100;
+                      const rightWidthRaw = mapProbToWidth(rightProb, t) * 100;
+                      const clamp = (v) => Math.min(100, Math.max(0, v));
+                      const leftWidth = clamp(leftWidthRaw);
+                      const rightWidth = clamp(rightWidthRaw);
+                      return (
+                        <tr key={dk} className="border-t border-gray-100">
+                          <td className="p-2 align-middle text-gray-700 whitespace-nowrap font-medium">{diseaseNames[dk]}</td>
+                          {/* Left eye bar */}
+                          <td className="p-2">
+                            <div className="relative pt-5">{/* extra top padding for marker */}
+                              {/* Marker (inverted wedge) */}
+                              <div className="absolute top-0 left-0 w-full pointer-events-none" style={{height:'20px'}}>
+                                <div
+                                  className="absolute w-4" style={{left: `${leftWidth}%`, transform:'translateX(-50%)'}}
+                                  title={`P:${formatProb(leftProb)} T:${formatProb(t)}`}
+                                  aria-label={`Left eye ${diseaseNames[dk]} probability ${formatProb(leftProb)}, threshold ${formatProb(t)}`}
+                                >
+                                  <div className="w-full h-2 bg-blue-600 rounded-t-sm shadow-sm"></div>
+                                  <div className="mx-auto" style={{
+                                    width: 0,
+                                    height: 0,
+                                    borderLeft: '8px solid transparent',
+                                    borderRight: '8px solid transparent',
+                                    borderTop: '10px solid rgba(37,99,235,0.95)',
+                                    filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.35))'
+                                  }} />
+                                </div>
+                              </div>
+                              {/* Bar */}
+                              <div className="relative h-5 rounded-full bg-gradient-to-r from-green-300 via-yellow-300 to-red-400 overflow-hidden shadow-inner">
+                                <div className="absolute top-0 left-0 h-full bg-green-600/20" style={{ width: `${leftWidth}%` }} />
+                                <div className="absolute top-0 left-1/2 w-0.5 h-full bg-gray-600/70" />
+                                <div className="absolute inset-0 flex justify-between px-1 text-[10px] leading-5 text-gray-600 select-none font-medium">
+                                  <span>{formatProb(leftProb)}</span>
+                                  <span className="text-gray-500">T:{formatProb(t)}</span>
+                                </div>
+                              </div>
+                            </div>
+                          </td>
+                          {/* Right eye bar */}
+                          <td className="p-2">
+                            <div className="relative pt-5">
+                              <div className="absolute top-0 left-0 w-full pointer-events-none" style={{height:'20px'}}>
+                                <div
+                                  className="absolute w-4" style={{left: `${rightWidth}%`, transform:'translateX(-50%)'}}
+                                  title={`P:${formatProb(rightProb)} T:${formatProb(t)}`}
+                                  aria-label={`Right eye ${diseaseNames[dk]} probability ${formatProb(rightProb)}, threshold ${formatProb(t)}`}
+                                >
+                                  <div className="w-full h-2 bg-blue-600 rounded-t-sm shadow-sm"></div>
+                                  <div className="mx-auto" style={{
+                                    width: 0,
+                                    height: 0,
+                                    borderLeft: '8px solid transparent',
+                                    borderRight: '8px solid transparent',
+                                    borderTop: '10px solid rgba(37,99,235,0.95)',
+                                    filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.35))'
+                                  }} />
+                                </div>
+                              </div>
+                              <div className="relative h-5 rounded-full bg-gradient-to-r from-green-300 via-yellow-300 to-red-400 overflow-hidden shadow-inner">
+                                <div className="absolute top-0 left-0 h-full bg-green-600/20" style={{ width: `${rightWidth}%` }} />
+                                <div className="absolute top-0 left-1/2 w-0.5 h-full bg-gray-600/70" />
+                                <div className="absolute inset-0 flex justify-between px-1 text-[10px] leading-5 text-gray-600 select-none font-medium">
+                                  <span>{formatProb(rightProb)}</span>
+                                  <span className="text-gray-500">T:{formatProb(t)}</span>
+                                </div>
+                              </div>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* Image Condition (Type and Quality) - Single Horizontal Line Layout */}
+            <div className="mb-8 p-5 rounded-lg shadow-sm border border-gray-100 bg-white">
+              <h3 className="text-lg font-semibold mb-4 text-gray-700 text-center">影像情况 (Image Condition)</h3>
               <div className="flex flex-col md:flex-row justify-center items-stretch gap-x-4 gap-y-4 overflow-x-auto pb-2"> {/* Added overflow-x-auto for smaller screens */}
                 {selectedDisplayImages.map((imageId, imgIndex) => {
                   const imgInfo = getDisplayedImageInfo(imageId);
                   if (!imgInfo) return null;
 
-                  const typeOptions = ['--- Select ---', '左眼CFP', '右眼CFP', '左眼外眼照', '右眼外眼照', 'OCT', 'FFA'];
+                  const typeOptions = ['--- Select ---', '左眼CFP', '右眼CFP', '左眼外眼照', '右眼外眼照'];
                   const qualityOptions = ['--- Select ---', 'Good', 'Usable', 'Bad'];
 
                   return (

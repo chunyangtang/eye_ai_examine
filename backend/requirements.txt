@@ -1,4 +1,5 @@
 
+tqdm
 requests
 fastapi[all]
 uvicorn 
