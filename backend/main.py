@@ -37,7 +37,7 @@ current_patient_index = 0 # This will now point to the "latest" patient added or
 patient_data_lock = threading.Lock() # Lock for thread-safe access to global data
 
 
-# Initialize dummy data on server startup
+# Initialize data on server startup
 # initial_patients = create_batch_dummy_patient_data()
 initial_patients = load_batch_patient_data()
 with patient_data_lock:

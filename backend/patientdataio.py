@@ -148,19 +148,18 @@ def generate_random_image_base64(text: str, color: tuple) -> str:
 
 
 def create_single_dummy_patient_data() -> PatientData:
-    """Creates dummy data for a single new patient for the external trigger."""
+    """Creates dummy patient data including random predictions and derived diagnoses."""
     patient_id = f"external_trigger_{int(time.time())}_{random.randint(100, 999)}"
-    
+
+    # --- Images ---
     eye_images: List[ImageInfo] = []
     image_types = ['左眼CFP', '右眼CFP', '左眼外眼照', '右眼外眼照']
     image_qualities = ['Good', 'Usable', 'Bad', '']
     colors = [(random.randint(0,255), random.randint(0,255), random.randint(0,255)) for _ in range(6)]
-    
-    # Ensure at least 4 images are generated, randomly choosing types
-    for i in range(6): # Generate a fixed number of images, or adjust as needed
+    for i in range(6):  # fixed number for predictable UI density; adjust if needed
         img_type = random.choice(image_types)
         img_quality = random.choice(image_qualities)
-        img_color = colors[i] # Use pre-defined random colors
+        img_color = colors[i]
         base64_data = generate_random_image_base64(f"{img_type}\nQ:{img_quality}\nImg {i+1}", img_color)
         eye_images.append(ImageInfo(
             id=f"img_{patient_id}_{i}",
@@ -168,64 +167,59 @@ def create_single_dummy_patient_data() -> PatientData:
             quality=img_quality,
             base64_data=base64_data
         ))
-    
-    # Simulate random diagnosis results
-    left_diagnosis = EyeDiagnosis(**{
-        disease: random.choice([True, False]) for disease in EyeDiagnosis.__fields__.keys()
-    })
 
-    right_diagnosis = EyeDiagnosis(**{
-        disease: random.choice([True, False]) for disease in EyeDiagnosis.__fields__.keys()
-    })
-    
+    # --- Prediction Thresholds ---
+    prediction_thresholds = EyePredictionThresholds()
+
+    # --- Random Predictions ---
+    def random_prediction() -> EyePrediction:
+        # Bias probabilities around thresholds: sample from uniform but occasionally spike
+        probs = {}
+        for field_name in EyePrediction.__fields__.keys():
+            base = random.random()
+            # 20% chance to concentrate near threshold region (±0.1) to exercise UI at decision boundary
+            threshold_val = getattr(prediction_thresholds, field_name, 0.5)
+            if random.random() < 0.2:
+                jitter = (random.random() - 0.5) * 0.2  # ±0.1
+                val = min(1.0, max(0.0, threshold_val + jitter))
+            else:
+                val = base
+            probs[field_name] = round(val, 4)
+        return EyePrediction(**probs)
+
+    left_pred = random_prediction()
+    right_pred = random_prediction()
+
+    prediction_results = {
+        "left_eye": left_pred,
+        "right_eye": right_pred
+    }
+
+    # --- Derive Diagnosis from Predictions & Thresholds ---
+    def derive_diagnosis(pred: EyePrediction) -> EyeDiagnosis:
+        diag_flags = {}
+        for disease in EyeDiagnosis.__fields__.keys():
+            threshold_val = getattr(prediction_thresholds, disease, 0.5)
+            prob_val = getattr(pred, disease, 0.0)
+            diag_flags[disease] = prob_val >= threshold_val
+        return EyeDiagnosis(**diag_flags)
+
+    diagnosis_results = {
+        "left_eye": derive_diagnosis(left_pred),
+        "right_eye": derive_diagnosis(right_pred)
+    }
+
     return PatientData(
         patient_id=patient_id,
         eye_images=eye_images,
-        diagnosis_results={
-            "left_eye": left_diagnosis,
-            "right_eye": right_diagnosis
-        }
+        prediction_thresholds=prediction_thresholds,
+        prediction_results=prediction_results,
+        diagnosis_results=diagnosis_results
     )
 
 def create_batch_dummy_patient_data(num_patients: int = 5) -> List[PatientData]:
-    """Creates an initial batch of dummy data on server startup."""
-    patients = []
-    for i in range(num_patients):
-        patient_id = f"startup_patient_{random.randint(1000, 9999)}"
-        eye_images: List[ImageInfo] = []
-        image_types = ['左眼CFP', '右眼CFP', '左眼外眼照', '右眼外眼照', '']
-        image_qualities = ['Good', 'Usable', 'Bad', '']
-        colors = [(200, 50, 50), (50, 200, 50), (50, 50, 200), (200, 200, 50), (50, 200, 200), (200, 50, 200)]
-
-        for img_idx in range(random.randint(1, 6)):
-            img_type = random.choice(image_types)
-            img_quality = random.choice(image_qualities)
-            img_color = random.choice(colors)
-            base64_data = generate_random_image_base64(f"{img_type}\nQ:{img_quality}\nImg {img_idx+1}", img_color)
-            eye_images.append(ImageInfo(
-                id=f"img_{patient_id}_{img_idx}",
-                type=img_type,
-                quality=img_quality,
-                base64_data=base64_data
-            ))
-        left_diagnosis = EyeDiagnosis(**{
-            disease: random.choice([True, False]) for disease in EyeDiagnosis.__fields__.keys()
-        })
-        right_diagnosis = EyeDiagnosis(**{
-            disease: random.choice([True, False]) for disease in EyeDiagnosis.__fields__.keys()
-        })
-        new_patient = PatientData(
-            patient_id=patient_id,
-            eye_images=eye_images,
-            prediction_results={
-                "left_eye": EyePrediction(),
-                "right_eye": EyePrediction()
-            },
-            prediction_thresholds=EyePredictionThresholds(),
-            diagnosis_results={
-                "left_eye": left_diagnosis,
-                "right_eye": right_diagnosis
-            }
-        )
-        patients.append(new_patient)
+    """Creates an initial batch of dummy data with random predictions and threshold-derived diagnoses."""
+    patients: List[PatientData] = []
+    for _ in range(num_patients):
+        patients.append(create_single_dummy_patient_data())
     return patients
