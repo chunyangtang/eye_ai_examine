@@ -434,63 +434,39 @@ function App() {
                           <td className="p-2 align-middle text-gray-700 whitespace-nowrap font-medium">{diseaseNames[dk]}</td>
                           {/* Left eye bar */}
                           <td className="p-2">
-                            <div className="relative pt-5">{/* extra top padding for marker */}
-                              {/* Marker (inverted wedge) */}
-                              <div className="absolute top-0 left-0 w-full pointer-events-none" style={{height:'20px'}}>
-                                <div
-                                  className="absolute w-4" style={{left: `${leftWidth}%`, transform:'translateX(-50%)'}}
-                                  title={`P:${formatProb(leftProb)} T:${formatProb(t)}`}
-                                  aria-label={`Left eye ${diseaseNames[dk]} probability ${formatProb(leftProb)}, threshold ${formatProb(t)}`}
-                                >
-                                  <div className="w-full h-2 bg-blue-600 rounded-t-sm shadow-sm"></div>
-                                  <div className="mx-auto" style={{
-                                    width: 0,
-                                    height: 0,
-                                    borderLeft: '8px solid transparent',
-                                    borderRight: '8px solid transparent',
-                                    borderTop: '10px solid rgba(37,99,235,0.95)',
-                                    filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.35))'
-                                  }} />
-                                </div>
+                            <div className="relative h-5 rounded-full bg-gradient-to-r from-green-300 via-yellow-300 to-red-400 overflow-hidden shadow-inner">
+                              {/* Fill overlay */}
+                              <div className="absolute top-0 left-0 h-full bg-green-600/20" style={{ width: `${leftWidth}%` }} />
+                              {/* Threshold marker at 50% */}
+                              <div className="absolute top-0 left-1/2 w-0.5 h-full bg-gray-600/70" />
+                              {/* Probability marker (line + diamond) */}
+                              <div className="absolute top-0 h-full flex items-center" style={{ left: `${leftWidth}%`, transform: 'translateX(-50%)' }}
+                                   title={`P:${formatProb(leftProb)} T:${formatProb(t)}`}
+                                   aria-label={`Left eye ${diseaseNames[dk]} probability ${formatProb(leftProb)}, threshold ${formatProb(t)}`}>
+                                <div className="w-0.5 h-full bg-blue-700/70"></div>
+                                <div className="absolute left-1/2 top-1/2 w-3 h-3 -translate-x-1/2 -translate-y-1/2 rotate-45 bg-blue-600 border border-white shadow-sm" />
                               </div>
-                              {/* Bar */}
-                              <div className="relative h-5 rounded-full bg-gradient-to-r from-green-300 via-yellow-300 to-red-400 overflow-hidden shadow-inner">
-                                <div className="absolute top-0 left-0 h-full bg-green-600/20" style={{ width: `${leftWidth}%` }} />
-                                <div className="absolute top-0 left-1/2 w-0.5 h-full bg-gray-600/70" />
-                                <div className="absolute inset-0 flex justify-between px-1 text-[10px] leading-5 text-gray-600 select-none font-medium">
-                                  <span>{formatProb(leftProb)}</span>
-                                  <span className="text-gray-500">T:{formatProb(t)}</span>
-                                </div>
+                              {/* Labels */}
+                              <div className="absolute inset-0 flex justify-between px-1 text-[10px] leading-5 text-gray-600 select-none font-medium">
+                                <span>{formatProb(leftProb)}</span>
+                                <span className="text-gray-500">T:{formatProb(t)}</span>
                               </div>
                             </div>
                           </td>
                           {/* Right eye bar */}
                           <td className="p-2">
-                            <div className="relative pt-5">
-                              <div className="absolute top-0 left-0 w-full pointer-events-none" style={{height:'20px'}}>
-                                <div
-                                  className="absolute w-4" style={{left: `${rightWidth}%`, transform:'translateX(-50%)'}}
-                                  title={`P:${formatProb(rightProb)} T:${formatProb(t)}`}
-                                  aria-label={`Right eye ${diseaseNames[dk]} probability ${formatProb(rightProb)}, threshold ${formatProb(t)}`}
-                                >
-                                  <div className="w-full h-2 bg-blue-600 rounded-t-sm shadow-sm"></div>
-                                  <div className="mx-auto" style={{
-                                    width: 0,
-                                    height: 0,
-                                    borderLeft: '8px solid transparent',
-                                    borderRight: '8px solid transparent',
-                                    borderTop: '10px solid rgba(37,99,235,0.95)',
-                                    filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.35))'
-                                  }} />
-                                </div>
+                            <div className="relative h-5 rounded-full bg-gradient-to-r from-green-300 via-yellow-300 to-red-400 overflow-hidden shadow-inner">
+                              <div className="absolute top-0 left-0 h-full bg-green-600/20" style={{ width: `${rightWidth}%` }} />
+                              <div className="absolute top-0 left-1/2 w-0.5 h-full bg-gray-600/70" />
+                              <div className="absolute top-0 h-full flex items-center" style={{ left: `${rightWidth}%`, transform: 'translateX(-50%)' }}
+                                   title={`P:${formatProb(rightProb)} T:${formatProb(t)}`}
+                                   aria-label={`Right eye ${diseaseNames[dk]} probability ${formatProb(rightProb)}, threshold ${formatProb(t)}`}>
+                                <div className="w-0.5 h-full bg-blue-700/70"></div>
+                                <div className="absolute left-1/2 top-1/2 w-3 h-3 -translate-x-1/2 -translate-y-1/2 rotate-45 bg-blue-600 border border-white shadow-sm" />
                               </div>
-                              <div className="relative h-5 rounded-full bg-gradient-to-r from-green-300 via-yellow-300 to-red-400 overflow-hidden shadow-inner">
-                                <div className="absolute top-0 left-0 h-full bg-green-600/20" style={{ width: `${rightWidth}%` }} />
-                                <div className="absolute top-0 left-1/2 w-0.5 h-full bg-gray-600/70" />
-                                <div className="absolute inset-0 flex justify-between px-1 text-[10px] leading-5 text-gray-600 select-none font-medium">
-                                  <span>{formatProb(rightProb)}</span>
-                                  <span className="text-gray-500">T:{formatProb(t)}</span>
-                                </div>
+                              <div className="absolute inset-0 flex justify-between px-1 text-[10px] leading-5 text-gray-600 select-none font-medium">
+                                <span>{formatProb(rightProb)}</span>
+                                <span className="text-gray-500">T:{formatProb(t)}</span>
                               </div>
                             </div>
                           </td>
@@ -502,98 +478,100 @@ function App() {
               </div>
             </div>
 
-            {/* Image Condition (Type and Quality) - Single Horizontal Line Layout */}
-            <div className="mb-8 p-5 rounded-lg shadow-sm border border-gray-100 bg-white">
-              <h3 className="text-lg font-semibold mb-4 text-gray-700 text-center">影像情况 (Image Condition)</h3>
-              <div className="flex flex-col md:flex-row justify-center items-stretch gap-x-4 gap-y-4 overflow-x-auto pb-2"> {/* Added overflow-x-auto for smaller screens */}
-                {selectedDisplayImages.map((imageId, imgIndex) => {
-                  const imgInfo = getDisplayedImageInfo(imageId);
-                  if (!imgInfo) return null;
-
-                  const typeOptions = ['--- Select ---', '左眼CFP', '右眼CFP', '左眼外眼照', '右眼外眼照'];
-                  const qualityOptions = ['--- Select ---', 'Good', 'Usable', 'Bad'];
-
-                  return (
-                    <div key={imgIndex} className="flex flex-col items-center gap-2 p-3 bg-gray-50 rounded-md border border-gray-200 flex-grow basis-0 min-w-[200px]">
-                      <span className="font-medium text-gray-700 text-sm whitespace-nowrap">Image {imgIndex + 1}:</span>
-                      <div className="flex flex-row gap-2 w-full">
-                        <select
-                          value={imgInfo.type}
-                          onChange={(e) => handleImageDetailChange(imgInfo.id, 'type', e.target.value)}
-                          className="p-2 border border-gray-300 rounded-md bg-white text-gray-700 text-sm flex-grow
-                            focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-150 shadow-sm"
-                        >
-                          {typeOptions.map(option => (
-                            <option key={option} value={option === '--- Select ---' ? '' : option}>{option}</option>
-                          ))}
-                        </select>
-                        <select
-                          value={imgInfo.quality}
-                          onChange={(e) => handleImageDetailChange(imgInfo.id, 'quality', e.target.value)}
-                          className="p-2 border border-gray-300 rounded-md bg-white text-gray-700 text-sm flex-grow
-                            focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-150 shadow-sm"
-                        >
-                          {qualityOptions.map(option => (
-                            <option key={option} value={option === '--- Select ---' ? '' : option}>{option}</option>
-                          ))}
-                        </select>
+            {/* Unified Interactive Correction Section */}
+            <div className="mb-10 p-6 rounded-lg shadow-sm border border-gray-200 bg-white">
+              <h3 className="text-xl font-semibold mb-2 text-gray-800 text-center">人工校正区 (Interactive Human Correction)</h3>
+              <p className="text-xs text-gray-500 mb-5 text-center">在此对影像类型/质量与疾病诊断结果进行人工复核与修改 (Review & adjust image metadata and disease diagnoses)</p>
+              {/* Image Condition Row */}
+              <div className="mb-6">
+                <h4 className="text-sm font-semibold text-gray-700 mb-3 tracking-wide">影像情况 (Image Condition)</h4>
+                <div className="flex flex-col md:flex-row justify-center items-stretch gap-x-4 gap-y-4 overflow-x-auto pb-2">
+                  {selectedDisplayImages.map((imageId, imgIndex) => {
+                    const imgInfo = getDisplayedImageInfo(imageId);
+                    if (!imgInfo) return null;
+                    const typeOptions = ['--- Select ---', '左眼CFP', '右眼CFP', '左眼外眼照', '右眼外眼照'];
+                    const qualityOptions = ['--- Select ---', 'Good', 'Usable', 'Bad'];
+                    return (
+                      <div key={imgIndex} className="flex flex-col items-center gap-2 p-3 bg-gray-50 rounded-md border border-gray-200 flex-grow basis-0 min-w-[200px]">
+                        <span className="font-medium text-gray-700 text-sm whitespace-nowrap">Image {imgIndex + 1}</span>
+                        <div className="flex flex-row gap-2 w-full">
+                          <select
+                            value={imgInfo.type}
+                            onChange={(e) => handleImageDetailChange(imgInfo.id, 'type', e.target.value)}
+                            className="p-2 border border-gray-300 rounded-md bg-white text-gray-700 text-xs md:text-sm flex-grow focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-150 shadow-sm"
+                          >
+                            {typeOptions.map(option => (
+                              <option key={option} value={option === '--- Select ---' ? '' : option}>{option}</option>
+                            ))}
+                          </select>
+                          <select
+                            value={imgInfo.quality}
+                            onChange={(e) => handleImageDetailChange(imgInfo.id, 'quality', e.target.value)}
+                            className="p-2 border border-gray-300 rounded-md bg-white text-gray-700 text-xs md:text-sm flex-grow focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-150 shadow-sm"
+                          >
+                            {qualityOptions.map(option => (
+                              <option key={option} value={option === '--- Select ---' ? '' : option}>{option}</option>
+                            ))}
+                          </select>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+              {/* Diagnosis Grid */}
+              <div>
+                <h4 className="text-sm font-semibold text-gray-700 mb-3 tracking-wide">疾病诊断 (Disease Diagnosis)</h4>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  {['left_eye', 'right_eye'].map(eye => (
+                    <div key={eye} className="border border-gray-100 rounded-lg p-4 bg-gray-50">
+                      <h5 className="text-sm font-semibold mb-4 text-center text-gray-800">
+                        {eye === 'left_eye' ? '左眼 (Left Eye)' : '右眼 (Right Eye)'}
+                      </h5>
+                      <div className="grid grid-cols-2 lg:grid-cols-3 gap-2">
+                        {Object.entries(patientData.diagnosis_results[eye]).map(([diseaseKey, isDetected]) => (
+                          <button
+                            key={diseaseKey}
+                            onClick={() => handleDiagnosisToggle(eye, diseaseKey)}
+                            className={`px-2 py-2 rounded-md shadow-sm border text-center text-[11px] md:text-xs font-medium tracking-tight
+                              ${isDetected ? 'bg-blue-600 text-white border-blue-700 hover:bg-blue-700' : 'bg-white text-gray-700 border-gray-200 hover:bg-gray-100'}
+                              focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-1 transition-colors`}
+                          >
+                            {diseaseNames[diseaseKey]}
+                          </button>
+                        ))}
                       </div>
                     </div>
-                  );
-                })}
-              </div>
-            </div>
-
-
-            {/* Diagnosis Results Section */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-x-12 gap-y-8 mb-10">
-              {['left_eye', 'right_eye'].map(eye => (
-                <div key={eye} className="border border-gray-200 rounded-xl p-6 shadow-md bg-gray-50">
-                  <h3 className="text-xl font-semibold mb-5 text-center text-gray-800">
-                    {eye === 'left_eye' ? '左眼疾病诊断 (Left Eye Disease Diagnosis)' : '右眼疾病诊断 (Right Eye Disease Diagnosis)'}
-                  </h3>
-                  <div className="grid grid-cols-2 lg:grid-cols-3 gap-3"> {/* Increased columns for diseases */}
-                    {Object.entries(patientData.diagnosis_results[eye]).map(([diseaseKey, isDetected]) => (
-                      <button
-                        key={diseaseKey}
-                        onClick={() => handleDiagnosisToggle(eye, diseaseKey)}
-                        className={`p-3 rounded-lg shadow-sm border transition-colors duration-200 text-center text-base font-medium
-                          ${isDetected ? 'bg-blue-600 text-white border-blue-700 hover:bg-blue-700' : 'bg-white text-gray-700 border-gray-100 hover:bg-gray-100'}
-                          focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-1`}
-                      >
-                        {diseaseNames[diseaseKey]}
-                      </button>
-                    ))}
-                  </div>
+                  ))}
                 </div>
-              ))}
-            </div>
-
-            {/* Submit/Discard Buttons */}
-            <div className="bg-gray-100 p-6 rounded-xl flex flex-col items-center justify-center space-y-5 md:flex-row md:space-y-0 md:space-x-6 shadow-inner">
-              <p className="text-md font-medium text-gray-700">
-                检测结果有误？可在页面中修正后提交 (Detection results are incorrect? You can modify and submit on this page)
-              </p>
-              <div className="flex space-x-4">
-                <button
-                  onClick={handleDiscardChanges} // Discard button now reloads original data
-                  className="px-7 py-3 bg-red-500 text-white rounded-lg shadow-md hover:bg-red-600 transition-colors duration-200 text-lg font-semibold"
-                >
-                  放弃 (Discard)
-                </button>
-                <button
-                  onClick={handleSubmitDiagnosis}
-                  disabled={isSubmitting}
-                  className={`px-7 py-3 rounded-lg shadow-md transition-colors duration-200 text-lg font-semibold
-                  ${isSubmitting ? 'bg-green-300 cursor-not-allowed' : 'bg-green-600 text-white hover:bg-green-700'}`}
-                >
-                  {isSubmitting ? '提交中...' : '提交 (Submit)'}
-                </button>
+              </div>
+              {/* Action Buttons Inside Unified Section */}
+              <div className="mt-8 flex flex-col md:flex-row items-center md:items-start justify-between gap-4">
+                <div className="w-full md:flex-1 text-sm font-medium text-green-700 min-h-[1.5rem] flex items-center" aria-live="polite">
+                  <span className={`${submitMessage ? 'opacity-100' : 'opacity-0'} transition-opacity duration-200`}>
+                    {submitMessage || ''}
+                  </span>
+                </div>
+                <div className="flex gap-4 md:justify-end w-full md:w-auto">
+                  <button
+                    onClick={handleDiscardChanges}
+                    className="px-6 py-2.5 bg-red-500 text-white rounded-lg shadow-md hover:bg-red-600 transition-colors duration-200 text-sm font-semibold"
+                  >
+                    放弃 (Discard)
+                  </button>
+                  <button
+                    onClick={handleSubmitDiagnosis}
+                    disabled={isSubmitting}
+                    className={`px-6 py-2.5 rounded-lg shadow-md transition-colors duration-200 text-sm font-semibold
+                      ${isSubmitting ? 'bg-green-300 cursor-not-allowed text-white' : 'bg-green-600 text-white hover:bg-green-700'}`}
+                  >
+                    {isSubmitting ? '提交中...' : '提交 (Submit)'}
+                  </button>
+                </div>
               </div>
             </div>
-            {submitMessage && (
-              <p className="mt-6 text-center text-md font-medium text-green-700">{submitMessage}</p>
-            )}
+
+            {/* (Old external submit/discard section removed; buttons now inside unified correction section) */}
           </div>
         )}
       </main>
