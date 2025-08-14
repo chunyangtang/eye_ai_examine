@@ -5,7 +5,7 @@ from typing import List, Dict
 class ImageInfo(BaseModel):
     id: str
     type: str  # i.e., '左眼CFP', '右眼CFP', '左眼外眼照', '右眼外眼照'
-    quality: str # i.e., 'Good', 'Usable', 'Bad'
+    quality: str # i.e., '图像质量高', '图像质量可用', '图像质量差'
     base64_data: str # Base64 encoded image
 
 
@@ -52,6 +52,31 @@ class EyeDiagnosis(BaseModel):
 
 
 
+class ManualEyeDiagnosis(BaseModel):
+    # Manual diagnosis for diseases not tied to AI predictions
+    青光眼: bool = False
+    糖网: bool = False
+    AMD: bool = False
+    病理性近视: bool = False
+    高度近视: bool = False  # High myopia - new addition
+    RVO: bool = False
+    RAO: bool = False
+    视网膜脱离: bool = False
+    其它视网膜病: bool = False
+    其它黄斑病变: bool = False
+    白内障: bool = False
+    正常: bool = False
+
+class CustomDiseases(BaseModel):
+    left_eye: str = ""
+    right_eye: str = ""
+
+class ManualDiagnosisData(BaseModel):
+    manual_diagnosis: Dict[str, ManualEyeDiagnosis]  # 'left_eye', 'right_eye'
+    custom_diseases: CustomDiseases
+    diagnosis_notes: str = ""
+
+
 class PatientData(BaseModel):
     patient_id: str
     eye_images: List[ImageInfo]
@@ -62,6 +87,9 @@ class PatientData(BaseModel):
 
 class SubmitDiagnosisRequest(BaseModel):
     patient_id: str
-    image_updates: List[Dict[str, str]]  # Only id, type, quality
-    diagnosis_results: Dict[str, EyeDiagnosis]
+    image_updates: List[Dict[str, str]] = None  # Only id, type, quality
+    # Manual diagnosis data
+    manual_diagnosis: Dict[str, ManualEyeDiagnosis] = None
+    custom_diseases: CustomDiseases = None
+    diagnosis_notes: str = ""
     

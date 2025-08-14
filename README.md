@@ -24,3 +24,23 @@ npm start
 
 Your browser should automatically open to `http://localhost:3000`.
 
+For other computers in the local network, open `http://<your-ip-address>:3000`.
+
+Use `http://<your-ip-address>:3000/?ris_exam_id=<exam_id>` to access a specific exam.
+
+
+## Description
+
+### Backend
+The backend is built with FastAPI and serves as the API for the frontend. It handles patient data, image processing, and model inference.
+
+**Files**
+- `main.py`: The entry point for the FastAPI application.
+- `patientdataio.py`: Handles reading and writing patient data.
+- `datatype.py`: Defines the data types used in the application.
+
+### Frontend
+The frontend is built with React and provides the user interface for the application. It communicates with the backend API to fetch and display data.
+
+**Files**
+- `src/App.js`: The main application component.

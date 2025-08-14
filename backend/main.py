@@ -5,17 +5,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Dict
 import threading # Import threading for Lock
 
-from datatype import ImageInfo, EyeDiagnosis, PatientData, SubmitDiagnosisRequest, EyePrediction, EyePredictionThresholds
+from datatype import ImageInfo, EyeDiagnosis, PatientData, SubmitDiagnosisRequest, EyePrediction, EyePredictionThresholds, ManualDiagnosisData
 from patientdataio import load_batch_patient_data, create_batch_dummy_patient_data
 
 app = FastAPI()
-
-# Configure CORS to allow requests from your React frontend
-# origins = [
-#     "http://localhost",
-#     "http://localhost:3000",
-#     "http://127.0.0.1:3000",
-# ]
 
 app.add_middleware(
     CORSMiddleware,
@@ -25,107 +18,141 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- Simulated Data Storage (In-memory) ---
-patients_data: Dict[str, PatientData] = {}
-patient_ids_order: List[str] = []
-current_patient_index = 0 # This will now point to the "latest" patient added or navigated to
+# --- Data Storage (In-memory cache) ---
+patients_data_cache: Dict[str, PatientData] = {}
+# Storage for manual diagnosis data (separate from AI predictions)
+manual_diagnosis_storage: Dict[str, ManualDiagnosisData] = {}
+patient_data_lock = threading.Lock() # Lock for thread-safe access to cached data
 
-patient_data_lock = threading.Lock() # Lock for thread-safe access to global data
-
-
-# Initialize data on server startup
-# initial_patients = create_batch_dummy_patient_data()
-initial_patients = load_batch_patient_data()
-with patient_data_lock:
-    for patient in initial_patients:
-        patients_data[patient.patient_id] = patient
-        patient_ids_order.append(patient.patient_id)
-    if patient_ids_order:
-        current_patient_index = 0
+# No preloading - data will be loaded on-demand
 
 # --- API Endpoints ---
-@app.get("/api/patients/current")
-async def get_current_patient_data():
-    """Returns the data for the current patient."""
-    global current_patient_index
+@app.get("/api/patients/{ris_exam_id}")
+async def get_patient_by_id(ris_exam_id: str):
+    """Returns the data for a specific patient by ris_exam_id (patient_id)."""
+    import time
+    start_time = time.time()
+    
     with patient_data_lock:
-        if not patient_ids_order:
-            raise HTTPException(status_code=404, detail="No patient data available")
+        # Check cache first
+        if ris_exam_id in patients_data_cache:
+            print(f"Serving cached data for patient: {ris_exam_id} (took {time.time() - start_time:.2f}s)")
+            return patients_data_cache[ris_exam_id]
         
-        patient_id = patient_ids_order[current_patient_index]
-        print(f"Serving data for current patient: {patient_id}")
-        return patients_data[patient_id]
+        # Load from data source
+        try:
+            print(f"Loading patient {ris_exam_id} from data source...")
+            from patientdataio import load_single_patient_data
+            patient_data = load_single_patient_data("../data/inference_results.json", ris_exam_id)
+            # Cache the loaded data
+            patients_data_cache[ris_exam_id] = patient_data
+            elapsed = time.time() - start_time
+            print(f"Loaded and cached data for patient: {ris_exam_id} (took {elapsed:.2f}s)")
+            return patient_data
+        except KeyError:
+            print(f"Patient {ris_exam_id} not found (took {time.time() - start_time:.2f}s)")
+            raise HTTPException(status_code=404, detail=f"Patient {ris_exam_id} not found")
+        except Exception as e:
+            print(f"Error loading patient {ris_exam_id}: {e} (took {time.time() - start_time:.2f}s)")
+            raise HTTPException(status_code=500, detail="Failed to load patient data")
 
-@app.get("/api/patients/next")
-async def get_next_patient_data():
-    """Returns the data for the next patient in sequence."""
-    global current_patient_index
-    with patient_data_lock:
-        if not patient_ids_order:
-            raise HTTPException(status_code=404, detail="No patient data available")
-        
-        current_patient_index = (current_patient_index + 1) % len(patient_ids_order)
-        patient_id = patient_ids_order[current_patient_index]
-        print(f"Serving data for next patient: {patient_id}")
-        return patients_data[patient_id]
-
-@app.get("/api/patients/previous")
-async def get_previous_patient_data():
-    """Returns the data for the previous patient in sequence."""
-    global current_patient_index
-    with patient_data_lock:
-        if not patient_ids_order:
-            raise HTTPException(status_code=404, detail="No patient data available")
-        
-        current_patient_index = (current_patient_index - 1 + len(patient_ids_order)) % len(patient_ids_order)
-        patient_id = patient_ids_order[current_patient_index]
-        print(f"Serving data for previous patient: {patient_id}")
-        return patients_data[patient_id]
+@app.get("/api/patients")
+async def get_available_patient_ids():
+    """Returns a list of available patient IDs from the data source."""
+    try:
+        import json
+        # Only load the JSON keys, not the full data
+        with open("../data/inference_results.json", "r", encoding="utf-8") as f:
+            data = json.load(f)
+        patient_ids = list(data.keys())
+        print(f"Found {len(patient_ids)} available patients")
+        return {"patient_ids": patient_ids}
+    except Exception as e:
+        print(f"Error loading patient IDs: {e}")
+        raise HTTPException(status_code=500, detail="Failed to load patient IDs")
 
 @app.post("/api/submit_diagnosis")
 async def submit_diagnosis(request: SubmitDiagnosisRequest):
     """
-    Receives updated diagnosis results and image info from the frontend and "saves" them.
+    Receives manual diagnosis data and image info updates from the frontend and stores them.
     """
     with patient_data_lock:
         print(f"Received diagnosis submission for patient: {request.patient_id}")
-        patient = patients_data.get(request.patient_id)
-        if patient:
-            patient.diagnosis_results = request.diagnosis_results
-            # Update image type/quality if provided
-            if hasattr(request, "image_updates") and request.image_updates:
-                for update_img in request.image_updates:
-                    for img in patient.eye_images:
-                        if img.id == update_img["id"]:
-                            img.type = update_img["type"]
-                            img.quality = update_img["quality"]
-            print(f"Diagnosis and image info updated for {request.patient_id}")
-            return {"status": "Diagnosis and image info submitted successfully!"}
+        
+        # Check if patient exists in cache
+        patient = patients_data_cache.get(request.patient_id)
+        if not patient:
+            raise HTTPException(status_code=404, detail=f"Patient {request.patient_id} not found in cache. Load patient data first.")
+        
+        # Store manual diagnosis data
+        if request.manual_diagnosis or request.custom_diseases or request.diagnosis_notes:
+            from datatype import ManualDiagnosisData, CustomDiseases
+            
+            manual_data = ManualDiagnosisData(
+                manual_diagnosis=request.manual_diagnosis or {},
+                custom_diseases=request.custom_diseases or CustomDiseases(),
+                diagnosis_notes=request.diagnosis_notes or ""
+            )
+            
+            manual_diagnosis_storage[request.patient_id] = manual_data
+            print(f"Manual diagnosis data stored for patient: {request.patient_id}")
+            print(f"Manual diagnosis: {manual_data.manual_diagnosis}")
+            print(f"Custom diseases: {manual_data.custom_diseases}")
+            print(f"Diagnosis notes: {manual_data.diagnosis_notes}")
+        
+        # Update image type/quality if provided
+        if request.image_updates:
+            for update_img in request.image_updates:
+                for img in patient.eye_images:
+                    if img.id == update_img["id"]:
+                        img.type = update_img["type"]
+                        img.quality = update_img["quality"]
+            print(f"Image info updated for {request.patient_id}")
+        
+        return {"status": "Manual diagnosis and image info submitted successfully!"}
+
+@app.get("/api/manual_diagnosis/{ris_exam_id}")
+async def get_manual_diagnosis(ris_exam_id: str):
+    """
+    Returns the manual diagnosis data for a specific patient.
+    """
+    with patient_data_lock:
+        manual_data = manual_diagnosis_storage.get(ris_exam_id)
+        if manual_data:
+            return manual_data
         else:
-            raise HTTPException(status_code=404, detail=f"Patient {request.patient_id} not found")
+            # Return empty structure if no manual diagnosis exists yet
+            from datatype import ManualDiagnosisData, CustomDiseases
+            return ManualDiagnosisData(
+                manual_diagnosis={},
+                custom_diseases=CustomDiseases(),
+                diagnosis_notes=""
+            )
+
+@app.get("/api/manual_diagnoses")
+async def get_all_manual_diagnoses():
+    """
+    Returns all stored manual diagnosis data for debugging purposes.
+    """
+    with patient_data_lock:
+        return {
+            "stored_diagnoses": list(manual_diagnosis_storage.keys()),
+            "data": manual_diagnosis_storage
+        }
 
 @app.post("/api/add_new_patient")
 async def add_new_patient_data(patient_data: PatientData):
     """
     Adds a new patient's data received from an external source (e.g., trigger script)
-    and sets them as the current patient.
+    and caches it for future access.
     """
-    global patients_data, patient_ids_order, current_patient_index
     with patient_data_lock:
-        if patient_data.patient_id in patients_data:
-            print(f"Patient {patient_data.patient_id} already exists. Overwriting.")
-            # Remove old entry from order if exists
-            if patient_data.patient_id in patient_ids_order:
-                patient_ids_order.remove(patient_data.patient_id)
+        if patient_data.patient_id in patients_data_cache:
+            print(f"Patient {patient_data.patient_id} already exists in cache. Overwriting.")
         
-        patients_data[patient_data.patient_id] = patient_data
-        patient_ids_order.append(patient_data.patient_id)
-        
-        # Set the newly added patient as the current one
-        current_patient_index = len(patient_ids_order) - 1 
-
-        print(f"New patient {patient_data.patient_id} added and set as current.")
-        return {"status": f"Patient {patient_data.patient_id} added successfully and set as current."}
+        patients_data_cache[patient_data.patient_id] = patient_data
+        print(f"New patient {patient_data.patient_id} added to cache.")
+        return {"status": f"Patient {patient_data.patient_id} added successfully to cache."}
 
 
 # Run the FastAPI application
