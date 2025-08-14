@@ -2,10 +2,6 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-from base64 import b64encode
-import io
-from PIL import Image, ImageDraw, ImageFont
-import random
 from typing import List, Dict
 import threading # Import threading for Lock
 
@@ -15,15 +11,15 @@ from patientdataio import load_batch_patient_data, create_batch_dummy_patient_da
 app = FastAPI()
 
 # Configure CORS to allow requests from your React frontend
-origins = [
-    "http://localhost",
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-]
+# origins = [
+#     "http://localhost",
+#     "http://localhost:3000",
+#     "http://127.0.0.1:3000",
+# ]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -135,4 +131,4 @@ async def add_new_patient_data(patient_data: PatientData):
 # Run the FastAPI application
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8000)

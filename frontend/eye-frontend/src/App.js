@@ -132,6 +132,13 @@ function App() {
   const [expandedImageInfo, setExpandedImageInfo] = useState(null); // Stores info of the image to expand
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false); // Track unsaved changes
 
+  // Dynamically determine the backend URL
+  // Use the same hostname as the frontend, but on port 8000
+  // Fallback to localhost for local development
+  const backendHost = window.location.hostname;
+  const backendUrl = `http://${backendHost}:8000`;
+
+
   const patientIdPrefix = "病人索引 (Patient Index): ";
 
   const diseaseNames = {
@@ -167,52 +174,58 @@ function App() {
   const formatProb = (p) => (p === undefined || p === null ? '--' : p.toFixed(2));
 
   // Helper function to deep compare two objects
-  const isDataEqual = (a, b) => {
-    return JSON.stringify(a) === JSON.stringify(b);
-  };
+  const isDataEqual = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
   const fetchPatientData = useCallback(async (endpoint, { skipIfUnsaved = false } = {}) => {
-    if (skipIfUnsaved && hasUnsavedChanges) return;
-    let willUpdate = false;
+    if (skipIfUnsaved && hasUnsavedChanges) {
+      return;
+    }
+
+    // Only show loading spinner on initial load or when navigating, not on background polling.
+    const isNavigating = endpoint === 'next' || endpoint === 'previous';
+    if (!patientData || isNavigating) {
+      setLoading(true);
+    }
+
     try {
-      const response = await fetch(`http://127.0.0.1:8000/api/patients/${endpoint}`);
+      const response = await fetch(`${backendUrl}/api/patients/${endpoint}`);
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`);
       }
       const result = await response.json();
-      // Only update if data is different and no unsaved changes
-      if (!hasUnsavedChanges && (!patientData || !isDataEqual(result, patientData))) {
-        willUpdate = true;
-        setLoading(true);
-        setPatientData(result);
-        // Initialize selectedDisplayImages
+
+      // Store a pristine copy of the data for tracking changes.
+      const dataWithOriginal = { ...result, original: JSON.parse(JSON.stringify(result)) };
+
+      // Update state only if data is new or navigation occurred.
+      if (isNavigating || !patientData || !isDataEqual(result, patientData)) {
+        setPatientData(dataWithOriginal);
+        setError(null); // Clear previous errors on successful fetch
+
+        // Initialize or update the 4 display images
         const uniqueImageTypes = {};
         result.eye_images.forEach(img => {
-          if (!uniqueImageTypes[img.type]) {
+          if (img.type && !uniqueImageTypes[img.type]) {
             uniqueImageTypes[img.type] = img.id;
           }
         });
         let initialSelection = Object.values(uniqueImageTypes);
-        // Ensure there are exactly 4 images for display
-        while (initialSelection.length < 4 && result.eye_images.length > 0) {
-          // If less than 4 unique types, auto display the same kind ones if available
-          const availableImages = result.eye_images.filter(img => !initialSelection.includes(img.id));
-          if (availableImages.length > 0) {
-            initialSelection.push(availableImages[0].id);
-          } else {
-            // If no new images to add, break to prevent infinite loop for patients with <4 images
-            break;
-          }
+        
+        // Fill remaining slots if necessary
+        const remainingImages = result.eye_images.filter(img => !initialSelection.includes(img.id));
+        while (initialSelection.length < 4 && remainingImages.length > 0) {
+          initialSelection.push(remainingImages.shift().id);
         }
         setSelectedDisplayImages(initialSelection.slice(0, 4));
+        setHasUnsavedChanges(false); // Reset unsaved changes flag
       }
     } catch (e) {
       console.error("Failed to fetch patient data:", e);
       setError(`Failed to load patient data: ${e.message}. Is the Python server running?`);
     } finally {
-      if (willUpdate) setLoading(false);
+      setLoading(false);
     }
-  }, [hasUnsavedChanges, patientData]);
+  }, [hasUnsavedChanges, patientData, backendUrl]);
 
   // Polling effect
   useEffect(() => {
@@ -260,30 +273,73 @@ function App() {
 
   // Submit both diagnosis and image info in one request
   const handleSubmitDiagnosis = async () => {
-    if (!patientData) return;
     setIsSubmitting(true);
-    setSubmitMessage('');
+    setSubmitMessage('Submitting...');
+
+    // Find the original patient data to compare against
+    const originalPatientData = patientData.original;
+
+    // 1. Prepare diagnosis data (only if it has changed)
+    let diagnosisPayload = null;
+    if (!isDataEqual(patientData.diagnosis_results, originalPatientData.diagnosis_results)) {
+      diagnosisPayload = patientData.diagnosis_results;
+    }
+
+    // 2. Prepare image info updates (only if they have changed)
+    const imageUpdates = patientData.eye_images
+      .map(currentImg => {
+        const originalImg = originalPatientData.eye_images.find(img => img.id === currentImg.id);
+        if (originalImg && (currentImg.type !== originalImg.type || currentImg.quality !== originalImg.quality)) {
+          return { id: currentImg.id, type: currentImg.type, quality: currentImg.quality };
+        }
+        return null;
+      })
+      .filter(Boolean); // Remove nulls
+
+    // If nothing changed, don't submit
+    if (!diagnosisPayload && imageUpdates.length === 0) {
+        setSubmitMessage("No changes to submit.");
+        setTimeout(() => setSubmitMessage(''), 3000);
+        setIsSubmitting(false);
+        return;
+    }
+
+
+    const payload = {
+      patient_id: patientData.patient_id,
+      diagnosis_results: diagnosisPayload,
+      image_updates: imageUpdates.length > 0 ? imageUpdates : null,
+    };
+
     try {
-      const response = await fetch('http://127.0.0.1:8000/api/submit_diagnosis', {
+      // Use the dynamic backendUrl
+      const response = await fetch(`${backendUrl}/api/submit_diagnosis`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          patient_id: patientData.patient_id,
-          diagnosis_results: patientData.diagnosis_results,
-          image_updates: patientData.eye_images.map(({id, type, quality}) => ({id, type, quality}))
-        }),
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
       });
+
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`);
       }
+
       const result = await response.json();
-      setSubmitMessage(result.status);
+      setSubmitMessage(result.status || 'Submission successful!');
+
+      // Successfully submitted, so no more unsaved changes
       setHasUnsavedChanges(false);
+
+      // Fetch the latest data from the server to ensure UI is in sync
+      // This also updates the 'original' state for future comparisons
       fetchPatientData('current');
-    } catch (e) {
-      console.error('Failed to submit diagnosis:', e);
-      setSubmitMessage(`Error submitting: ${e.message}`);
+
+    } catch (error) {
+      console.error("Failed to submit diagnosis:", error);
+      setSubmitMessage(`Error: ${error.message}`);
     } finally {
+      setTimeout(() => setSubmitMessage(''), 5000); // Keep message visible longer on error
       setIsSubmitting(false);
     }
   };
