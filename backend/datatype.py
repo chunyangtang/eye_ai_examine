@@ -36,6 +36,11 @@ class EyePredictionThresholds(BaseModel):
     白内障: float = 0.6
     正常: float = 0.08 # 'Normal'
 
+
+# Separate threshold for cataract when using external-eye (外眼) predictions
+CATARACT_EXTERNAL_THRESHOLD = 0.6
+
+
 class EyeDiagnosis(BaseModel):
     # Dictionary where keys are disease names and values are boolean (detected/not detected)
     青光眼: bool = False

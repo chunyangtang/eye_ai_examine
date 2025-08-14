@@ -359,15 +359,20 @@ function App() {
 
       const eyeLabel = eyeKey === 'left_eye' ? '左眼' : '右眼';
 
-      // Build array of { key, p, t }
-      const items = diseaseOrder.map((dk) => ({
-        key: dk,
-        p: preds[dk] ?? 0,
-        t: thresholds[dk] ?? 0.5,
-      }));
+      // Build array of { key, p, t, score } where score is threshold-remapped probability
+      const items = diseaseOrder.map((dk) => {
+        const p = preds[dk] ?? 0;
+        const t = thresholds[dk] ?? 0.5;
+        return {
+          key: dk,
+          p,
+          t,
+          score: mapProbToWidth(p, t),
+        };
+      });
 
-      // Sort by probability desc
-      items.sort((a, b) => b.p - a.p);
+  // Sort by remapped score desc (threshold at 0.5)
+  items.sort((a, b) => b.score - a.score);
       const [top, ...rest] = items;
       if (!top) return '';
 
@@ -376,17 +381,17 @@ function App() {
       // Choose a natural phrase based on relation to threshold
       const t = top.t ?? 0.5;
       const p = top.p ?? 0;
-      let probPhrase = '概率较高';
-      if (p >= t * 1.2) probPhrase = '概率明显偏高';
-      else if (p >= t) probPhrase = '概率较高';
-      else if (p >= t * 0.8) probPhrase = '概率接近阈值';
-      else probPhrase = '概率较低';
+      let probPhrase = '风险偏高';
+      if (p >= t * 1.2) probPhrase = '风险明显偏高';
+      else if (p >= t) probPhrase = '风险较高';
+      else if (p >= t * 0.8) probPhrase = '风险较高';
+      else probPhrase = '可能存在风险';
 
       // If top is 正常, use a more natural normal-first sentence
       if (top.key === '正常') {
         const others = rest
           .filter((x) => x.key !== '正常' && (x.p ?? 0) >= 0.2 * (x.t ?? 0.5))
-          .sort((a, b) => b.p - a.p)
+          .sort((a, b) => b.score - a.score)
           .slice(0, 2)
           .map((x) => diseaseInfo[x.key]?.chinese || x.key);
 
@@ -402,7 +407,7 @@ function App() {
       // Build secondary mentions, skipping '正常'
       const others = rest
         .filter((x) => x.key !== '正常' && (x.p ?? 0) >= 0.2 * (x.t ?? 0.5))
-        .sort((a, b) => b.p - a.p)
+        .sort((a, b) => b.score - a.score)
         .slice(0, 2)
         .map((x) => diseaseInfo[x.key]?.chinese || x.key);
 
@@ -653,28 +658,10 @@ function App() {
     setExpandedImageInfo(null);
   };
 
-  // Navigation functions
+  // Navigation function (manual go-to only)
   const navigateToExam = (examId) => {
     if (examId) {
       window.location.href = `${window.location.pathname}?ris_exam_id=${examId}`;
-    }
-  };
-
-  const navigateToPrevious = () => {
-    // You can implement this based on your exam ID logic
-    // For now, this is a placeholder that you can customize
-    const currentId = parseInt(currentExamId);
-    if (!isNaN(currentId) && currentId > 1) {
-      navigateToExam(currentId - 1);
-    }
-  };
-
-  const navigateToNext = () => {
-    // You can implement this based on your exam ID logic
-    // For now, this is a placeholder that you can customize
-    const currentId = parseInt(currentExamId);
-    if (!isNaN(currentId)) {
-      navigateToExam(currentId + 1);
     }
   };
 
@@ -761,13 +748,6 @@ function App() {
 
             {/* Image Display Section */}
             <div className="relative flex items-center justify-center mb-10 bg-gray-50 p-6 rounded-xl shadow-inner">
-              {/* Left arrow for previous examination */}
-              <IconButton onClick={navigateToPrevious} className="absolute left-3 z-10">
-                <svg xmlns="http://www.w3.org/2000/svg" className="h-8 w-8" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-                </svg>
-              </IconButton>
-
               <div className="flex flex-wrap justify-center gap-6 mx-12">
                 {selectedDisplayImages.map((imageId, index) => {
                   const imgInfo = getDisplayedImageInfo(imageId);
@@ -798,13 +778,7 @@ function App() {
                   );
                 })}
               </div>
-
-              {/* Right arrow for next examination */}
-              <IconButton onClick={navigateToNext} className="absolute right-3 z-10">
-                <svg xmlns="http://www.w3.org/2000/svg" className="h-8 w-8" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                </svg>
-              </IconButton>
+              {/** Arrow navigation removed **/}
             </div>
 
             {/* Prediction Probability Bars Section */}

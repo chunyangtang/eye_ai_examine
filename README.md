@@ -39,6 +39,8 @@ The backend is built with FastAPI and serves as the API for the frontend. It han
 - `patientdataio.py`: Handles reading and writing patient data.
 - `datatype.py`: Defines the data types used in the application.
 
+As for now (2025.8.14), the backend is defaulted to use data from `{project_root}/data` for existing exams.
+
 ### Frontend
 The frontend is built with React and provides the user interface for the application. It communicates with the backend API to fetch and display data.
 

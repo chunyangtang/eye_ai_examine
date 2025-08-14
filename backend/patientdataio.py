@@ -9,7 +9,8 @@ import os
 from PIL import Image, ImageDraw, ImageFont
 from tqdm import tqdm
 
-from datatype import PatientData, ImageInfo, EyePrediction, EyePredictionThresholds, EyeDiagnosis
+from datatype import PatientData, ImageInfo, EyePrediction, EyePredictionThresholds, EyeDiagnosis, CATARACT_EXTERNAL_THRESHOLD
+
 
 
 
@@ -53,13 +54,14 @@ def load_batch_patient_data(data_path="../data/inference_results.json") -> List[
         "白内障": "白内障",
         "正常": "正常"
     }
-    prediction_thresholds = EyePredictionThresholds()
+    # Create thresholds per patient inside the loop to avoid cross-patient mutation
 
     with open(data_path, "r", encoding="utf-8") as f:
         data = json.load(f)
 
     patients = []
     for pid, pdata in tqdm(data.items(), desc="Loading patient data"):
+        prediction_thresholds = EyePredictionThresholds()
         # Images
         eye_images = []
         for img in pdata.get("images", []):
@@ -78,23 +80,51 @@ def load_batch_patient_data(data_path="../data/inference_results.json") -> List[
 
         # Prediction results
         prediction_results = {}
+        # Track whether external-eye cataract probability is used per eye
+        ext_cataract_used = {"left_eye": False, "right_eye": False}
         for eye in ["left_eye", "right_eye"]:
-            # Find the first image for this eye
-            img_for_eye = next((im for im in pdata.get("images", []) if image_type_mapping.get(im.get("eye", ""), "") == ("左眼CFP" if eye == "left_eye" else "右眼CFP")), None)
-            if img_for_eye and img_for_eye.get("probs"):
-                probs = {diagnosis_mapping.get(k, k): v for k, v in img_for_eye.get("probs", {}).items()}
+            # Find CFP and 外眼 images for this eye
+            cfp_type = "左眼CFP" if eye == "left_eye" else "右眼CFP"
+            ext_type = "左眼外眼照" if eye == "left_eye" else "右眼外眼照"
+            cfp_img = next((im for im in pdata.get("images", []) if image_type_mapping.get(im.get("eye", ""), "") == cfp_type), None)
+            ext_img = next((im for im in pdata.get("images", []) if image_type_mapping.get(im.get("eye", ""), "") == ext_type), None)
+
+            # Base probabilities from CFP (or zeros if missing)
+            if cfp_img and cfp_img.get("probs"):
+                cfp_probs = {diagnosis_mapping.get(k, k): v for k, v in cfp_img.get("probs", {}).items()}
             else:
-                # Fill with zeros if missing
-                probs = {disease: 0.0 for disease in diagnosis_mapping.values()}
+                cfp_probs = {disease: 0.0 for disease in diagnosis_mapping.values()}
+
+            # External-eye probabilities (if available)
+            ext_probs = None
+            if ext_img and ext_img.get("probs"):
+                ext_probs = {diagnosis_mapping.get(k, k): v for k, v in ext_img.get("probs", {}).items()}
+
+            # Start with CFP-based probs
+            probs = dict(cfp_probs)
+            # Prefer 外眼 cataract if available
+            if ext_probs is not None and "白内障" in ext_probs:
+                probs["白内障"] = ext_probs["白内障"]
+                ext_cataract_used[eye] = True
+
             prediction_results[eye] = EyePrediction(**probs)
+
+        # If either eye uses external-eye cataract probability, reflect that in thresholds for UI
+        if ext_cataract_used["left_eye"] or ext_cataract_used["right_eye"]:
+            setattr(prediction_thresholds, "白内障", CATARACT_EXTERNAL_THRESHOLD)
 
         # Diagnosis results (thresholding)
         diagnosis_results = {}
         for eye in ["left_eye", "right_eye"]:
             diag = {}
             for disease, threshold in prediction_thresholds.dict().items():
+                # Use a separate threshold for cataract if external-eye prob was used
+                if disease == "白内障" and ext_cataract_used.get(eye, False):
+                    threshold_to_use = CATARACT_EXTERNAL_THRESHOLD
+                else:
+                    threshold_to_use = threshold
                 prob = getattr(prediction_results[eye], disease, 0.0)
-                diag[disease] = prob >= threshold
+                diag[disease] = prob >= threshold_to_use
             diagnosis_results[eye] = EyeDiagnosis(**diag)
 
         patients.append(PatientData(
@@ -163,23 +193,44 @@ def load_single_patient_data(data_path: str, patient_id: str) -> PatientData:
 
     # Process prediction results
     prediction_results = {}
+    ext_cataract_used = {"left_eye": False, "right_eye": False}
     for eye in ["left_eye", "right_eye"]:
-        # Find the first image for this eye
-        img_for_eye = next((im for im in pdata.get("images", []) if image_type_mapping.get(im.get("eye", ""), "") == ("左眼CFP" if eye == "left_eye" else "右眼CFP")), None)
-        if img_for_eye and img_for_eye.get("probs"):
-            probs = {diagnosis_mapping.get(k, k): v for k, v in img_for_eye.get("probs", {}).items()}
+        cfp_type = "左眼CFP" if eye == "left_eye" else "右眼CFP"
+        ext_type = "左眼外眼照" if eye == "left_eye" else "右眼外眼照"
+        cfp_img = next((im for im in pdata.get("images", []) if image_type_mapping.get(im.get("eye", ""), "") == cfp_type), None)
+        ext_img = next((im for im in pdata.get("images", []) if image_type_mapping.get(im.get("eye", ""), "") == ext_type), None)
+
+        if cfp_img and cfp_img.get("probs"):
+            cfp_probs = {diagnosis_mapping.get(k, k): v for k, v in cfp_img.get("probs", {}).items()}
         else:
-            # Fill with zeros if missing
-            probs = {disease: 0.0 for disease in diagnosis_mapping.values()}
+            cfp_probs = {disease: 0.0 for disease in diagnosis_mapping.values()}
+
+        ext_probs = None
+        if ext_img and ext_img.get("probs"):
+            ext_probs = {diagnosis_mapping.get(k, k): v for k, v in ext_img.get("probs", {}).items()}
+
+        probs = dict(cfp_probs)
+        if ext_probs is not None and "白内障" in ext_probs:
+            probs["白内障"] = ext_probs["白内障"]
+            ext_cataract_used[eye] = True
+
         prediction_results[eye] = EyePrediction(**probs)
+
+    # If either eye uses external-eye cataract probability, reflect that in thresholds for UI
+    if ext_cataract_used["left_eye"] or ext_cataract_used["right_eye"]:
+        setattr(prediction_thresholds, "白内障", CATARACT_EXTERNAL_THRESHOLD)
 
     # Diagnosis results (thresholding)
     diagnosis_results = {}
     for eye in ["left_eye", "right_eye"]:
         diag = {}
         for disease, threshold in prediction_thresholds.dict().items():
+            if disease == "白内障" and ext_cataract_used.get(eye, False):
+                threshold_to_use = CATARACT_EXTERNAL_THRESHOLD
+            else:
+                threshold_to_use = threshold
             prob = getattr(prediction_results[eye], disease, 0.0)
-            diag[disease] = prob >= threshold
+            diag[disease] = prob >= threshold_to_use
         diagnosis_results[eye] = EyeDiagnosis(**diag)
 
     return PatientData(
