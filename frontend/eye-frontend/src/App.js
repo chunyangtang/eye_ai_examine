@@ -430,6 +430,71 @@ function App() {
     }
   };
 
+  // Compute highlight groups per eye
+  // - Primaries: all diseases crossing threshold (p >= t); if '正常' crosses, show only '正常'
+  // - Secondaries: up to 2 diseases (exclude '正常' and primaries) crossing half-threshold (p >= 0.5*t)
+  const getEyeHighlights = (eyeKey) => {
+    const preds = patientData?.prediction_results?.[eyeKey];
+    const thresholds = patientData?.prediction_thresholds || {};
+    if (!preds) return { primaries: [], secondaries: [] };
+
+    const items = diseaseOrder.map((dk) => {
+      const p = preds[dk] ?? 0;
+      const t = thresholds[dk] ?? 0.5;
+      return { key: dk, p, t, score: mapProbToWidth(p, t) };
+    });
+
+    // Helper to enrich an item for UI
+    const enrich = (x) => ({
+      key: x.key,
+      name: diseaseInfo[x.key]?.chinese || x.key,
+      p: x.p,
+      t: x.t,
+      status: x.key === '正常'
+        ? '正常'
+        : (x.p >= x.t * 1.2 ? '明显偏高' : (x.p >= x.t ? '较高' : (x.p >= x.t * 0.8 ? '接近阈值' : '较低')))
+    });
+
+    // Sort once by remapped score desc
+    items.sort((a, b) => b.score - a.score);
+
+    const above = items.filter((x) => (x.p ?? 0) >= (x.t ?? 0.5));
+
+    let primaries = [];
+    let secondaries = [];
+
+    if (above.length > 0) {
+      // If Normal is above threshold, only show Normal as primary, but still allow secondaries
+      const normalIdx = above.findIndex((x) => x.key === '正常');
+      if (normalIdx !== -1) {
+        primaries = [enrich(above[normalIdx])];
+        secondaries = items
+          .filter((x) => x.key !== '正常' && (x.p ?? 0) >= 0.5 * (x.t ?? 0.5))
+          .sort((a, b) => b.score - a.score)
+          .slice(0, 2)
+          .map(enrich);
+      } else {
+        primaries = above.map(enrich);
+        secondaries = items
+          .filter((x) => x.key !== '正常' && !above.find((a) => a.key === x.key) && (x.p ?? 0) >= 0.5 * (x.t ?? 0.5))
+          .sort((a, b) => b.score - a.score)
+          .slice(0, 2)
+          .map(enrich);
+      }
+    } else {
+      // No disease above threshold: pick the top candidate as primary
+      const [top] = items;
+      if (top) primaries = [enrich(top)];
+      secondaries = items
+        .filter((x) => x.key !== '正常' && (!top || x.key !== top.key) && (x.p ?? 0) >= 0.5 * (x.t ?? 0.5))
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 2)
+        .map(enrich);
+    }
+
+    return { primaries, secondaries };
+  };
+
   const fetchPatientData = useCallback(async (examId) => {
     if (!examId) {
       setError('No ris_exam_id provided in URL. Please add ?ris_exam_id=<exam_id> to the URL.');
@@ -462,21 +527,55 @@ function App() {
 
       setPatientData(dataWithOriginal);
 
-      // Initialize the 4 display images
-      const uniqueImageTypes = {};
-      result.eye_images.forEach(img => {
-        if (img.type && !uniqueImageTypes[img.type]) {
-          uniqueImageTypes[img.type] = img.id;
+      // Initialize the 4 display images in a fixed desired order with graceful fallback
+      const desiredOrder = ['左眼CFP', '右眼CFP', '左眼外眼照', '右眼外眼照'];
+      const allImages = Array.isArray(result.eye_images) ? result.eye_images : [];
+      const selectedIds = [];
+      const used = new Set();
+
+      // First pass: pick images matching desired types in order
+      for (const type of desiredOrder) {
+        const match = allImages.find((img) => img.type === type && !used.has(img.id));
+        if (match) {
+          selectedIds.push(match.id);
+          used.add(match.id);
         }
-      });
-      let initialSelection = Object.values(uniqueImageTypes);
-      
-      // Fill remaining slots if necessary
-      const remainingImages = result.eye_images.filter(img => !initialSelection.includes(img.id));
-      while (initialSelection.length < 4 && remainingImages.length > 0) {
-        initialSelection.push(remainingImages.shift().id);
       }
-      setSelectedDisplayImages(initialSelection.slice(0, 4));
+
+      // Second pass: follow desired order again to fill additional images of those types
+      const desiredSet = new Set(desiredOrder);
+      const imagesByType = new Map();
+      for (const img of allImages) {
+        const t = img.type || '';
+        if (!imagesByType.has(t)) imagesByType.set(t, []);
+        imagesByType.get(t).push(img);
+      }
+
+      for (const type of desiredOrder) {
+        if (selectedIds.length >= 4) break;
+        const list = imagesByType.get(type) || [];
+        for (const img of list) {
+          if (selectedIds.length >= 4) break;
+          if (!used.has(img.id)) {
+            selectedIds.push(img.id);
+            used.add(img.id);
+          }
+        }
+      }
+
+      // Third pass: if still not enough, include any remaining images of other/unknown types (stable order)
+      if (selectedIds.length < 4) {
+        for (const img of allImages) {
+          if (selectedIds.length >= 4) break;
+          if (desiredSet.has(img.type)) continue;
+          if (!used.has(img.id)) {
+            selectedIds.push(img.id);
+            used.add(img.id);
+          }
+        }
+      }
+
+      setSelectedDisplayImages(selectedIds.slice(0, 4));
       setHasUnsavedChanges(false); // Reset unsaved changes flag
       
       // Initialize manual diagnosis states
@@ -781,6 +880,84 @@ function App() {
               {/** Arrow navigation removed **/}
             </div>
 
+            {/* AI Highlights Section */}
+            <div className="mb-8 p-6 rounded-2xl shadow-sm border border-indigo-300 bg-indigo-50/60">
+              <h3 className="text-2xl font-bold mb-4 text-indigo-900 text-center tracking-tight">
+                AI检查摘要 (AI Examination Summary)
+              </h3>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                {['left_eye','right_eye'].map((eyeKey) => {
+                  const eyeLabel = eyeKey === 'left_eye' ? '左眼 (Left Eye)' : '右眼 (Right Eye)';
+                  const { primaries, secondaries } = getEyeHighlights(eyeKey);
+                  const statusTextMap = {
+                    '明显偏高': '明显高于阈值 / Markedly above T',
+                    '较高': '高于阈值 / Above T',
+                    '接近阈值': '接近阈值 / Near T',
+                    '较低': '低于阈值 / Below T',
+                  };
+                  return (
+                    <div key={eyeKey} className="p-5 rounded-xl bg-white border border-indigo-200 shadow-sm">
+                      <div className="text-sm font-semibold text-gray-800 mb-3">{eyeLabel}</div>
+                      {primaries.length > 0 ? (
+                        <div>
+                          {/* Primaries: show all above-threshold or the top one if none above */}
+                          <div className="flex flex-col gap-3">
+                            {primaries.map((pItem) => (
+                              pItem.key === '正常' ? (
+                                <div key={pItem.key}>
+                                  <div className="mt-1 text-xs text-gray-600">总体判断 (Overall)</div>
+                                  <div className="text-xl md:text-2xl font-semibold text-green-700">正常 (Normal)</div>
+                                </div>
+                              ) : (
+                                <div key={pItem.key}>
+                                  <div className="text-xs text-gray-600">首要考虑 (Primary)</div>
+                                  <div className="text-lg md:text-xl font-semibold text-gray-900">{pItem.name}</div>
+                                  <div className="flex items-center gap-2 mt-1">
+                                    <span className="inline-flex items-center px-2 py-0.5 rounded bg-blue-50 text-blue-800 text-xs border border-blue-200">
+                                      P {formatProb(pItem.p)} · T {formatProb(pItem.t)}
+                                    </span>
+                                    <span className={
+                                      `inline-flex items-center px-2 py-0.5 rounded text-xs border ${
+                                        pItem.status === '明显偏高' ? 'bg-red-50 text-red-800 border-red-200' :
+                                        pItem.status === '较高' ? 'bg-orange-50 text-orange-800 border-orange-200' :
+                                        pItem.status === '接近阈值' ? 'bg-yellow-50 text-yellow-800 border-yellow-200' :
+                                        'bg-gray-50 text-gray-700 border-gray-200'
+                                      }`
+                                    }>
+                                      {statusTextMap[pItem.status] || pItem.status}
+                                    </span>
+                                  </div>
+                                </div>
+                              )
+                            ))}
+                          </div>
+
+                          {/* Secondaries: at most 2 chips, may be none; show even if Normal is primary */}
+                          {secondaries.length > 0 && (
+                            <div className="mt-3">
+                              <div className="text-xs font-medium text-gray-500 uppercase tracking-wide">次要关注 (Secondary)</div>
+                              <div className="mt-2 flex flex-wrap gap-2">
+                                {secondaries.map((o) => (
+                                  <span
+                                    key={o.key}
+                                    className="px-2.5 py-1 rounded-full bg-amber-400/10 text-amber-700 text-xs border border-amber-300/40 opacity-85"
+                                  >
+                                    {o.name}
+                                  </span>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                        <div className="text-sm text-gray-500">暂无要点 (No highlights)</div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
             {/* Prediction Probability Bars Section */}
             <div className="mb-8 p-5 rounded-lg shadow-sm border border-gray-100 bg-white">
               <h3 className="text-lg font-semibold mb-3 text-gray-700 text-center">AI预测概率 (Model Prediction Probabilities)</h3>
@@ -859,20 +1036,7 @@ function App() {
               </div>
             </div>
 
-            {/* AI Summary Section */}
-            <div className="mb-8 p-5 rounded-lg shadow-sm border border-gray-100 bg-white">
-              <h3 className="text-lg font-semibold mb-3 text-gray-700 text-center">AI总结 (AI Detection Summary)</h3>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm text-gray-800">
-                <div className="p-3 rounded-md bg-gray-50 border border-gray-100">
-                  <div className="font-semibold mb-1">左眼 (Left Eye)</div>
-                  <p className="leading-6">{buildEyeSummary('left_eye') || '暂无总结'}</p>
-                </div>
-                <div className="p-3 rounded-md bg-gray-50 border border-gray-100">
-                  <div className="font-semibold mb-1">右眼 (Right Eye)</div>
-                  <p className="leading-6">{buildEyeSummary('right_eye') || '暂无总结'}</p>
-                </div>
-              </div>
-            </div>
+            {/* AI Summary Section removed and replaced by AI Highlights above */}
 
             {/* Unified Interactive Correction Section */}
             <div className="mb-10 p-6 rounded-lg shadow-sm border border-gray-200 bg-white">
