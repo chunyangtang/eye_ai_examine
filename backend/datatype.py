@@ -98,3 +98,8 @@ class SubmitDiagnosisRequest(BaseModel):
     custom_diseases: CustomDiseases = None
     diagnosis_notes: str = ""
     
+
+class UpdateSelectionRequest(BaseModel):
+    patient_id: str
+    selected_image_ids: List[str]
+    

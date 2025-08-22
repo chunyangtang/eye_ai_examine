@@ -12,6 +12,38 @@ from tqdm import tqdm
 from datatype import PatientData, ImageInfo, EyePrediction, EyePredictionThresholds, EyeDiagnosis, CATARACT_EXTERNAL_THRESHOLD
 
 
+def _parse_ts_from_path(p: str) -> int:
+    """Extract an integer timestamp-like value from filename (best-effort).
+    Example: '10665476_20240926103221697.jpg' -> 20240926103221697
+    Returns 0 if not found.
+    """
+    try:
+        base = os.path.basename(p)
+        name, _ = os.path.splitext(base)
+        # pick the last underscore segment if any
+        parts = name.split('_')
+        cand = parts[-1] if parts else name
+        # keep only digits
+        digits = ''.join(ch for ch in cand if ch.isdigit())
+        return int(digits) if digits else 0
+    except Exception:
+        return 0
+
+
+def _pick_latest_by_type(images_json_list, image_type_mapping, desired_type: str):
+    """From raw JSON images, pick the one with mapped type == desired_type and latest timestamp from img_path.
+    Return the raw image dict or None.
+    """
+    candidates = [
+        im for im in images_json_list
+        if image_type_mapping.get(im.get("eye", ""), "") == desired_type
+    ]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda im: _parse_ts_from_path(im.get("img_path", "")), reverse=True)
+    return candidates[0]
+
+
 
 
 def read_image(image_path):
@@ -83,11 +115,11 @@ def load_batch_patient_data(data_path="../data/inference_results.json") -> List[
         # Track whether external-eye cataract probability is used per eye
         ext_cataract_used = {"left_eye": False, "right_eye": False}
         for eye in ["left_eye", "right_eye"]:
-            # Find CFP and 外眼 images for this eye
+            # Find latest CFP and 外眼 images for this eye
             cfp_type = "左眼CFP" if eye == "left_eye" else "右眼CFP"
             ext_type = "左眼外眼照" if eye == "left_eye" else "右眼外眼照"
-            cfp_img = next((im for im in pdata.get("images", []) if image_type_mapping.get(im.get("eye", ""), "") == cfp_type), None)
-            ext_img = next((im for im in pdata.get("images", []) if image_type_mapping.get(im.get("eye", ""), "") == ext_type), None)
+            cfp_img = _pick_latest_by_type(pdata.get("images", []), image_type_mapping, cfp_type)
+            ext_img = _pick_latest_by_type(pdata.get("images", []), image_type_mapping, ext_type)
 
             # Base probabilities from CFP (or zeros if missing)
             if cfp_img and cfp_img.get("probs"):
@@ -197,8 +229,8 @@ def load_single_patient_data(data_path: str, patient_id: str) -> PatientData:
     for eye in ["left_eye", "right_eye"]:
         cfp_type = "左眼CFP" if eye == "left_eye" else "右眼CFP"
         ext_type = "左眼外眼照" if eye == "left_eye" else "右眼外眼照"
-        cfp_img = next((im for im in pdata.get("images", []) if image_type_mapping.get(im.get("eye", ""), "") == cfp_type), None)
-        ext_img = next((im for im in pdata.get("images", []) if image_type_mapping.get(im.get("eye", ""), "") == ext_type), None)
+        cfp_img = _pick_latest_by_type(pdata.get("images", []), image_type_mapping, cfp_type)
+        ext_img = _pick_latest_by_type(pdata.get("images", []), image_type_mapping, ext_type)
 
         if cfp_img and cfp_img.get("probs"):
             cfp_probs = {diagnosis_mapping.get(k, k): v for k, v in cfp_img.get("probs", {}).items()}

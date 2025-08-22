@@ -646,9 +646,33 @@ function App() {
     setHasUnsavedChanges(true);
   };
 
-  const handleReselectImages = (newSelectedIds) => {
+  const handleReselectImages = async (newSelectedIds) => {
     setSelectedDisplayImages(newSelectedIds);
     setHasUnsavedChanges(true);
+    try {
+      const payload = {
+        patient_id: patientData?.patient_id,
+        selected_image_ids: newSelectedIds,
+      };
+      const resp = await fetch(`${backendUrl}/api/update_selection`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (!resp.ok) {
+        console.warn('Update selection failed:', resp.status);
+        return;
+      }
+      const updated = await resp.json();
+      setPatientData(prev => prev ? ({
+        ...prev,
+        prediction_results: updated.prediction_results || prev.prediction_results,
+        diagnosis_results: updated.diagnosis_results || prev.diagnosis_results,
+        prediction_thresholds: updated.prediction_thresholds || prev.prediction_thresholds,
+      }) : prev);
+    } catch (e) {
+      console.warn('Failed updating selection:', e);
+    }
   };
 
   const handleDiscardChanges = () => {
@@ -935,7 +959,7 @@ function App() {
                           {/* Secondaries: at most 2 chips, may be none; show even if Normal is primary */}
                           {secondaries.length > 0 && (
                             <div className="mt-3">
-                              <div className="text-xs font-medium text-gray-500 uppercase tracking-wide">次要关注 (Secondary)</div>
+                              <div className="text-xs font-medium text-gray-500 tracking-wide">次要关注 (Secondary)</div>
                               <div className="mt-2 flex flex-wrap gap-2">
                                 {secondaries.map((o) => (
                                   <span
