@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 
 // Reusable Button Component
 const IconButton = ({ children, onClick, className = '' }) => (
@@ -119,6 +119,292 @@ const ExpandedImageModal = ({ isOpen, onClose, imageInfo }) => {
   );
 };
 
+// ConsultationInfoSection component - This will be displayed on the left
+const ConsultationInfoSection = ({ consultationData, onChange, onSubmit, isSubmitting }) => {
+  // Mapping of choice codes to human-readable text
+  const symptomMapping = {
+    "A": "视物模糊/视力下降",
+    "B": "眼前出现漂浮物、黑影飘动",
+    "C": "闪光感/水波纹/视物遮挡", 
+    "D": "眼红/充血/分泌物增多/眼痒",
+    "E": "眼睛干涩/异物感/疲劳",
+    "F": "眼睛长了小疙瘩/肿物（眼睑/角膜/结膜）",
+    "G": "眼痛/眼眶痛",
+    "H": "眼球突出",
+    "I": "其他症状"
+  };
+  
+  const onsetMapping = {
+    "A": "突发性（数小时内迅速出现）",
+    "B": "渐进性（数天或更长时间缓慢加重）"
+  };
+  
+  const historyMapping = {
+    "A": "近期外伤、眼部手术或接触化学物质",
+    "B": "有高血压、糖尿病等全身疾病史",
+    "C": "长期戴隐形眼镜或屈光不正史",
+    "D": "长期屏幕使用史",
+    "E": "无明显诱因或既往病史"
+  };
+  
+  // Format accompanying symptoms
+  const formatAccompanyingSymptoms = (symptoms) => {
+    if (!symptoms) return "";
+    if (typeof symptoms === 'string') return symptoms; // already free text
+    if (!Array.isArray(symptoms) || symptoms.length === 0) return "";
+    const symptomTexts = {
+      A: "畏光/怕光", B: "眼部分泌物异常", C: "眼部有异物感或疼痛", D: "眼部肿胀",
+      E: "头痛/恶心呕吐", F: "复视", G: "视野缺损", H: "视物变形",
+      I: "眼球运动障碍", J: "看灯光有彩虹样光环", K: "眼前红色烟雾样遮挡",
+      L: "色觉异常", M: "无其他明显症状"
+    };
+    return symptoms.map(s => symptomTexts[s] || s).join(", ");
+  };
+
+  // Helpers
+  const ensureEyeField = (data, eye) => {
+    const eyeField = eye === 'left' ? 'leftEye' : eye === 'right' ? 'rightEye' : 'bothEyes';
+    if (!data[eyeField]) data[eyeField] = {};
+    return eyeField;
+  };
+
+  const getEyeData = (eye) => {
+    if (!consultationData) return null;
+    if (eye === 'left') return consultationData.leftEye || null;
+    if (eye === 'right') return consultationData.rightEye || null;
+    if (eye === 'both') return consultationData.bothEyes || null;
+    return null;
+  };
+
+  const handleChange = (field, value) => {
+    if (!onChange) return;
+    onChange({ ...consultationData, [field]: value });
+  };
+
+  const handleEyeChange = (eye, field, value) => {
+    if (!onChange) return;
+    const eyeField = eye === 'left' ? 'leftEye' : eye === 'right' ? 'rightEye' : 'bothEyes';
+    const updatedEyeData = { ...(consultationData[eyeField] || {}), [field]: value };
+    onChange({ ...consultationData, [eyeField]: updatedEyeData });
+  };
+
+  // NEW: intelligent toggle that preserves and pre-fills data
+  const toggleAffectedArea = (area) => {
+    const currentAreas = new Set(consultationData.affectedArea || []);
+    const nextData = { ...consultationData, affectedArea: Array.from(currentAreas) };
+
+    // Ensure fields exist but do NOT clear any existing data
+    const leftField = 'leftEye';
+    const rightField = 'rightEye';
+    const bothField = 'bothEyes';
+
+    // Initialize containers if missing (no wipe)
+    if (!nextData[leftField]) nextData[leftField] = {};
+    if (!nextData[rightField]) nextData[rightField] = {};
+    if (!nextData[bothField]) nextData[bothField] = {};
+
+    if (area === 'both') {
+      if (currentAreas.has('both')) {
+        // Deselect 'both' -> just remove the flag, keep bothEyes data
+        nextData.affectedArea = [...currentAreas].filter(a => a !== 'both');
+      } else {
+        // Select 'both' -> remove individual flags
+        nextData.affectedArea = ['both'];
+        // Prefill bothEyes from the most recently non-empty eye
+        const source = Object.keys(nextData[rightField] || {}).length ? nextData[rightField]
+                      : Object.keys(nextData[leftField] || {}).length ? nextData[leftField]
+                      : nextData[bothField];
+        nextData[bothField] = { ...(source || {}) };
+      }
+    } else {
+      // Individual eyes
+      if (currentAreas.has(area)) {
+        // Deselect one eye
+        nextData.affectedArea = [...currentAreas].filter(a => a !== area);
+      } else {
+        // Selecting one eye removes 'both'
+        const others = [...currentAreas].filter(a => a !== 'both');
+        nextData.affectedArea = Array.from(new Set([...others, area]));
+        const destField = area === 'left' ? leftField : rightField;
+        // Prefill from bothEyes if dest empty
+        if (Object.keys(nextData[destField] || {}).length === 0 && Object.keys(nextData[bothField] || {}).length > 0) {
+          nextData[destField] = { ...nextData[bothField] };
+        }
+      }
+    }
+
+    onChange(nextData);
+  };
+
+  if (!consultationData) {
+    return (
+      <div className="bg-white rounded-lg shadow-md p-4 h-full">
+        <h3 className="text-lg font-semibold mb-4">问诊信息 (Consultation Info)</h3>
+        <p className="text-gray-500 italic">No consultation information available</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="bg-white rounded-lg shadow-md p-4 h-full overflow-y-auto">
+      <div className="flex justify-between items-center mb-4">
+        <h3 className="text-lg font-semibold">问诊信息 (Consultation Info)</h3>
+        <button
+          onClick={() => onSubmit && onSubmit()}
+          disabled={isSubmitting}
+          className={`px-3 py-1 rounded text-sm ${
+            isSubmitting 
+              ? "bg-blue-300 text-white cursor-not-allowed" 
+              : "bg-blue-600 text-white hover:bg-blue-700"
+          }`}
+        >
+          {isSubmitting ? "保存中..." : "保存 (Save)"}
+        </button>
+      </div>
+      
+      <div className="space-y-4 text-sm">
+        {/* Basic Info */}
+        <div className="space-y-2">
+          <div className="flex">
+            <span className="w-24 text-gray-600">姓名 (Name):</span>
+            <input 
+              type="text"
+              value={consultationData.name || ''}
+              onChange={e => handleChange('name', e.target.value)}
+              className="flex-1 border-b border-gray-300 focus:outline-none focus:border-blue-500 px-1"
+            />
+          </div>
+          
+          <div className="flex">
+            <span className="w-24 text-gray-600">电话 (Phone):</span>
+            <input 
+              type="text"
+              value={consultationData.phone || ''}
+              onChange={e => handleChange('phone', e.target.value)}
+              className="flex-1 border-b border-gray-300 focus:outline-none focus:border-blue-500 px-1"
+            />
+          </div>
+        </div>
+        
+        {/* Affected Areas */}
+        <div>
+          <span className="block text-gray-600 font-medium mb-1">受累部位 (Affected Areas):</span>
+          <div className="flex flex-wrap gap-3 pl-2">
+            {['left', 'right', 'both'].map((area) => {
+              const isSelected = (consultationData.affectedArea || []).includes(area);
+              const areaLabel = area === 'left' ? '左眼 (Left Eye)' : 
+                              area === 'right' ? '右眼 (Right Eye)' : 
+                              '双眼 (Both Eyes)';
+              
+              return (
+                <label key={area} className="flex items-center cursor-pointer group">
+                  <input 
+                    type="checkbox"
+                    checked={isSelected}
+                    onChange={() => toggleAffectedArea(area)}
+                    className="form-checkbox h-4 w-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500"
+                  />
+                  <span className={`ml-2 text-sm transition-colors ${isSelected ? 'text-blue-700 font-medium' : 'text-gray-600 group-hover:text-blue-600'}`}>
+                    {areaLabel}
+                  </span>
+                </label>
+              );
+            })}
+          </div>
+          <div className="mt-2 text-xs text-gray-500 italic">
+            切换左右/双眼不会清空已填写内容；从“双眼”切换到单眼时，会预填入已填写的信息。
+          </div>
+        </div>
+        
+        {/* Eye-specific information */}
+        {['left', 'right', 'both'].map(eye => {
+          // Only show this eye section if it's in the affected areas
+          if (!(consultationData.affectedArea || []).includes(eye)) return null;
+          
+          const eyeData = getEyeData(eye) || {};
+          const eyeLabel = eye === 'left' ? '左眼 (Left Eye)' : 
+                          eye === 'right' ? '右眼 (Right Eye)' : 
+                          '双眼 (Both Eyes)';
+          
+          return (
+            <div key={eye} className="border-t border-gray-200 pt-3 mt-3">
+              <div className="flex justify-between items-center">
+                <h4 className="font-medium text-blue-600 mb-2">{eyeLabel}</h4>
+              </div>
+              
+              <div className="space-y-2 pl-2">
+                {/* Main Symptom */}
+                <div>
+                  <span className="block text-gray-600">主要症状 (Main Symptom):</span>
+                  <textarea
+                    value={
+                      eyeData.mainSymptom
+                        ? (eyeData.mainSymptom === 'I' && eyeData.mainSymptomOther
+                            ? eyeData.mainSymptomOther
+                            : (symptomMapping[eyeData.mainSymptom] || eyeData.mainSymptom))
+                        : ''
+                    }
+                    onChange={(e) => handleEyeChange(eye, 'mainSymptom', e.target.value)}
+                    className="w-full border rounded-md p-1 text-sm"
+                    rows={2}
+                  />
+                </div>
+                
+                {/* Onset Method & Time */}
+                <div>
+                  <span className="block text-gray-600">症状起病方式及时间 (Onset):</span>
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={eyeData.onsetMethod ? (onsetMapping[eyeData.onsetMethod] || eyeData.onsetMethod) : ''}
+                      onChange={(e) => handleEyeChange(eye, 'onsetMethod', e.target.value)}
+                      placeholder="起病方式"
+                      className="flex-1 border rounded-md p-1 text-sm"
+                    />
+                    <input
+                      type="text"
+                      value={eyeData.onsetTime || ''}
+                      onChange={(e) => handleEyeChange(eye, 'onsetTime', e.target.value)}
+                      placeholder="起病时间"
+                      className="flex-1 border rounded-md p-1 text-sm"
+                    />
+                  </div>
+                </div>
+                
+                {/* Accompanying Symptoms */}
+                <div>
+                  <span className="block text-gray-600">伴随症状 (Accompanying):</span>
+                  <textarea
+                    value={formatAccompanyingSymptoms(eyeData.accompanyingSymptoms)}
+                    onChange={(e) => handleEyeChange(eye, 'accompanyingSymptoms', e.target.value)}
+                    className="w-full border rounded-md p-1 text-sm"
+                    rows={2}
+                  />
+                </div>
+                
+                {/* Medical History */}
+                <div>
+                  <span className="block text-gray-600">既往病史及诱因 (History):</span>
+                  <textarea
+                    value={eyeData.medicalHistory ? (historyMapping[eyeData.medicalHistory] || eyeData.medicalHistory) : ''}
+                    onChange={(e) => handleEyeChange(eye, 'medicalHistory', e.target.value)}
+                    className="w-full border rounded-md p-1 text-sm"
+                    rows={2}
+                  />
+                </div>
+              </div>
+            </div>
+          );
+        })}
+        
+        {/* Submission Time */}
+        <div className="border-t border-gray-200 pt-2 text-xs text-gray-500">
+          提交时间 (Submission Time): {consultationData.submissionTime || 'N/A'}
+        </div>
+      </div>
+    </div>
+  );
+};
 
 function App() {
   const [patientData, setPatientData] = useState(null);
@@ -788,6 +1074,85 @@ function App() {
     }
   };
 
+  // Add state for consultation info
+  const [consultationData, setConsultationData] = useState(null);
+  const [consultationDataEdited, setConsultationDataEdited] = useState(null);
+  const [isConsultationSubmitting, setIsConsultationSubmitting] = useState(false);
+  const [consultationSubmitMessage, setConsultationSubmitMessage] = useState('');
+  
+  // Fetch consultation data
+  const fetchConsultationData = useCallback(async (patientId) => {
+    if (!patientId) return;
+    
+    try {
+      const response = await fetch(`${backendUrl}/api/consultation/${patientId}`);
+      if (!response.ok) {
+        console.warn(`Failed to fetch consultation data: ${response.status}`);
+        return;
+      }
+      
+      const data = await response.json();
+      if (data.consultation_data) {
+        setConsultationData(data.consultation_data);
+        setConsultationDataEdited(JSON.parse(JSON.stringify(data.consultation_data)));
+      }
+    } catch (e) {
+      console.error("Error fetching consultation data:", e);
+    }
+  }, [backendUrl]);
+  
+  // Fetch patient data and consultation data
+  useEffect(() => {
+    if (currentExamId) {
+      fetchPatientData(currentExamId);
+      fetchConsultationData(currentExamId);
+    } else {
+      setError('No ris_exam_id provided in URL. Please add ?ris_exam_id=<exam_id> to the URL.');
+      setLoading(false);
+    }
+  }, [currentExamId, fetchPatientData, fetchConsultationData]);
+  
+  // Handle consultation data changes
+  const handleConsultationChange = useCallback((newData) => {
+    setConsultationDataEdited(newData);
+  }, []);
+  
+  // Submit consultation changes
+  const handleConsultationSubmit = useCallback(async () => {
+    if (!consultationDataEdited || !currentExamId) return;
+    
+    setIsConsultationSubmitting(true);
+    setConsultationSubmitMessage('');
+    
+    try {
+      const response = await fetch(`${backendUrl}/api/consultation`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          patient_id: currentExamId,
+          consultation_data: consultationDataEdited
+        }),
+      });
+      
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      
+      const result = await response.json();
+      setConsultationSubmitMessage(result.status || 'Consultation data saved!');
+      setConsultationData(consultationDataEdited); // Update the original data
+      
+    } catch (e) {
+      console.error("Failed to submit consultation data:", e);
+      setConsultationSubmitMessage(`Error: ${e.message}`);
+    } finally {
+      setIsConsultationSubmitting(false);
+      setTimeout(() => setConsultationSubmitMessage(''), 3000);
+    }
+  }, [backendUrl, currentExamId, consultationDataEdited]);
+  
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-100 to-purple-100 p-6 font-inter text-gray-800 antialiased">
       {/* Header */}
@@ -860,48 +1225,75 @@ function App() {
                   </button>
                 </div>
               </div>
-              <button
-                onClick={() => setIsModalOpen(true)}
-                className="px-4 py-1.5 bg-green-600 text-white rounded-lg shadow-md
-                hover:bg-green-700 transition-all duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 text-sm"
-              >
-                重新选择图片 (Reselect Image)
-              </button>
+              {/* Removed redundant top reselect button */}
+              {/* ...existing code... */}
             </div>
 
-            {/* Image Display Section */}
-            <div className="relative flex items-center justify-center mb-10 bg-gray-50 p-6 rounded-xl shadow-inner">
-              <div className="flex flex-wrap justify-center gap-6 mx-12">
-                {selectedDisplayImages.map((imageId, index) => {
-                  const imgInfo = getDisplayedImageInfo(imageId);
-                  return (
-                    <div
-                      key={index}
-                      className="flex-shrink-0 w-64 h-72 bg-white rounded-lg shadow-md overflow-hidden border border-gray-200 transform hover:scale-105 transition-transform duration-200 group cursor-pointer" // Added cursor-pointer
-                      onClick={() => imgInfo && openExpandedImageModal(imgInfo)} // Add onClick to open modal
-                    >
-                      {imgInfo ? (
-                        <>
-                          <img
-                            src={`data:image/png;base64,${imgInfo.base64_data}`}
-                            alt={`Image ${index + 1}`}
-                            className="w-full h-56 object-cover border-b border-gray-200 group-hover:opacity-80 transition-opacity"
-                          />
-                          <div className="p-3 text-sm text-center">
-                            <p className="font-semibold text-gray-900 group-hover:text-blue-700 transition-colors">IMAGE {index + 1}</p>
-                            <p className="text-gray-600">{imgInfo.type}</p>
-                          </div>
-                        </>
-                      ) : (
-                        <div className="w-full h-72 bg-gray-200 flex items-center justify-center text-gray-500 text-sm">
-                          No Image Selected
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
+            {/* New Left-Right Layout */}
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-10 items-stretch">
+              {/* Left column: Consultation Info */}
+              <div className="lg:col-span-1 h-full">
+                <ConsultationInfoSection 
+                  consultationData={consultationDataEdited}
+                  onChange={handleConsultationChange}
+                  onSubmit={handleConsultationSubmit}
+                  isSubmitting={isConsultationSubmitting}
+                />
+                {consultationSubmitMessage && (
+                  <div className="mt-2 text-center">
+                    <p className="text-green-600 text-sm">{consultationSubmitMessage}</p>
+                  </div>
+                )}
               </div>
-              {/** Arrow navigation removed **/}
+              
+              {/* Right column: Images */}
+              <div className="lg:col-span-2 h-full">
+                {/* Image Display Section */}
+                <div className="relative flex h-full items-center justify-center bg-gray-50 p-6 rounded-xl shadow-inner min-h-[560px]">
+                  <div className="flex flex-wrap justify-center gap-6 mx-auto">
+                    {selectedDisplayImages.map((imageId, index) => {
+                      const imgInfo = getDisplayedImageInfo(imageId);
+                      return (
+                        <div
+                          key={index}
+                          className="flex-shrink-0 w-56 h-64 bg-white rounded-lg shadow-md overflow-hidden border border-gray-200 transform hover:scale-105 transition-transform duration-200 group cursor-pointer"
+                          onClick={() => imgInfo && openExpandedImageModal(imgInfo)}
+                        >
+                          {imgInfo ? (
+                            <>
+                              <img
+                                src={`data:image/png;base64,${imgInfo.base64_data}`}
+                                alt={`Image ${index + 1}`}
+                                className="w-full h-48 object-cover border-b border-gray-200 group-hover:opacity-80 transition-opacity"
+                              />
+                              <div className="p-3 text-sm text-center">
+                                <p className="font-semibold text-gray-900 group-hover:text-blue-700 transition-colors">IMAGE {index + 1}</p>
+                                <p className="text-gray-600">{imgInfo.type}</p>
+                              </div>
+                            </>
+                          ) : (
+                            <div className="w-full h-64 bg-gray-200 flex items-center justify-center text-gray-500 text-sm">
+                              No Image Selected
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                  {/* Bottom-right overlay reselect button (single source of truth) */}
+                  <button
+                    onClick={() => setIsModalOpen(true)}
+                    className="absolute bottom-3 right-3 z-20 px-3 py-2 rounded-full
+                               bg-white/90 text-blue-700 border border-blue-200 shadow-lg backdrop-blur-sm
+                               hover:bg-white hover:shadow-xl transition-all duration-200 ease-in-out focus:outline-none
+                               focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
+                    title="重新选择图片 (Reselect Images)"
+                    aria-label="重新选择图片 (Reselect Images)"
+                  >
+                    重新选择图片
+                  </button>
+                </div>
+              </div>
             </div>
 
             {/* AI Highlights Section */}
@@ -1059,8 +1451,6 @@ function App() {
                 </table>
               </div>
             </div>
-
-            {/* AI Summary Section removed and replaced by AI Highlights above */}
 
             {/* Unified Interactive Correction Section */}
             <div className="mb-10 p-6 rounded-lg shadow-sm border border-gray-200 bg-white">

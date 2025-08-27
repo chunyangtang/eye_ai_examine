@@ -61,6 +61,117 @@ def read_image(image_path):
         return None
 
 
+# --- Load a single patient from JSON (Optimized) ---
+def load_single_patient_data(data_path: str, patient_id: str) -> PatientData:
+    """
+    Load and parse a single patient's data from a JSON file by patient_id.
+    Returns a PatientData object or raises KeyError if not found.
+    Optimized to only process the requested patient's data.
+    """
+    image_type_mapping = {
+        "右眼眼底": "右眼CFP",
+        "左眼眼底": "左眼CFP",
+        "右眼外观": "右眼外眼照",
+        "左眼外观": "左眼外眼照",
+    }
+    default_image_quality = ""
+    diagnosis_mapping = {
+        "青光眼": "青光眼",
+        "糖尿病性视网膜病变": "糖网",
+        "年龄相关性黄斑变性": "AMD",
+        "病理性近视": "病理性近视",
+        "视网膜静脉阻塞（RVO）": "RVO",
+        "视网膜动脉阻塞（RAO）": "RAO",
+        "视网膜脱离（RD）": "视网膜脱离",
+        "其他视网膜病": "其它视网膜病",
+        "其他黄斑病变": "其它黄斑病变",
+        "白内障": "白内障",
+        "正常": "正常"
+    }
+    prediction_thresholds = EyePredictionThresholds()
+
+    # Load only the JSON data first
+    with open(data_path, "r", encoding="utf-8") as f:
+        all_data = json.load(f)
+    
+    # Check if patient exists before processing
+    if patient_id not in all_data:
+        raise KeyError(f"Patient {patient_id} not found in {data_path}")
+    
+    pdata = all_data[patient_id]
+    
+    # Extract name and examine_time if available
+    name = pdata.get("name")
+    examine_time = pdata.get("examineTime")
+    
+    # Process only this patient's images
+    eye_images = []
+    for img in pdata.get("images", []):
+        img_type = image_type_mapping.get(img.get("eye", ""), "")
+        img_quality = default_image_quality
+        prefix = os.path.dirname(data_path)
+        img_rel = img.get("img_path", "")
+        full_path = os.path.join(prefix, img_rel)
+        base64_data = read_image(full_path)
+        eye_images.append(ImageInfo(
+            id=f"img_{patient_id}_{img.get('img_path', '')}",
+            type=img_type,
+            quality=img_quality,
+            base64_data=base64_data
+        ))
+
+    # Process prediction results
+    prediction_results = {}
+    ext_cataract_used = {"left_eye": False, "right_eye": False}
+    for eye in ["left_eye", "right_eye"]:
+        cfp_type = "左眼CFP" if eye == "left_eye" else "右眼CFP"
+        ext_type = "左眼外眼照" if eye == "left_eye" else "右眼外眼照"
+        cfp_img = _pick_latest_by_type(pdata.get("images", []), image_type_mapping, cfp_type)
+        ext_img = _pick_latest_by_type(pdata.get("images", []), image_type_mapping, ext_type)
+
+        if cfp_img and cfp_img.get("probs"):
+            cfp_probs = {diagnosis_mapping.get(k, k): v for k, v in cfp_img.get("probs", {}).items()}
+        else:
+            cfp_probs = {disease: 0.0 for disease in diagnosis_mapping.values()}
+
+        ext_probs = None
+        if ext_img and ext_img.get("probs"):
+            ext_probs = {diagnosis_mapping.get(k, k): v for k, v in ext_img.get("probs", {}).items()}
+
+        probs = dict(cfp_probs)
+        if ext_probs is not None and "白内障" in ext_probs:
+            probs["白内障"] = ext_probs["白内障"]
+            ext_cataract_used[eye] = True
+
+        prediction_results[eye] = EyePrediction(**probs)
+
+    # If either eye uses external-eye cataract probability, reflect that in thresholds for UI
+    if ext_cataract_used["left_eye"] or ext_cataract_used["right_eye"]:
+        setattr(prediction_thresholds, "白内障", CATARACT_EXTERNAL_THRESHOLD)
+
+    # Diagnosis results (thresholding)
+    diagnosis_results = {}
+    for eye in ["left_eye", "right_eye"]:
+        diag = {}
+        for disease, threshold in prediction_thresholds.dict().items():
+            if disease == "白内障" and ext_cataract_used.get(eye, False):
+                threshold_to_use = CATARACT_EXTERNAL_THRESHOLD
+            else:
+                threshold_to_use = threshold
+            prob = getattr(prediction_results[eye], disease, 0.0)
+            diag[disease] = prob >= threshold_to_use
+        diagnosis_results[eye] = EyeDiagnosis(**diag)
+
+    return PatientData(
+        patient_id=patient_id,
+        name=name,  # Added name field
+        examine_time=examine_time,  # Added examine_time field
+        eye_images=eye_images,
+        prediction_results=prediction_results,
+        prediction_thresholds=prediction_thresholds,
+        diagnosis_results=diagnosis_results
+    )
+
 def load_batch_patient_data(data_path="../data/inference_results.json") -> List[PatientData]:
     """
     Load and parse a batch of patient data from a JSON file.
@@ -93,6 +204,10 @@ def load_batch_patient_data(data_path="../data/inference_results.json") -> List[
 
     patients = []
     for pid, pdata in tqdm(data.items(), desc="Loading patient data"):
+        # Extract name and examine_time if available
+        name = pdata.get("name")
+        examine_time = pdata.get("examineTime")
+        
         prediction_thresholds = EyePredictionThresholds()
         # Images
         eye_images = []
@@ -161,119 +276,14 @@ def load_batch_patient_data(data_path="../data/inference_results.json") -> List[
 
         patients.append(PatientData(
             patient_id=pid,
+            name=name,  # Added name field
+            examine_time=examine_time,  # Added examine_time field
             eye_images=eye_images,
             prediction_results=prediction_results,
             prediction_thresholds=prediction_thresholds,
             diagnosis_results=diagnosis_results
         ))
     return patients
-
-# --- Load a single patient from JSON (Optimized) ---
-def load_single_patient_data(data_path: str, patient_id: str) -> PatientData:
-    """
-    Load and parse a single patient's data from a JSON file by patient_id.
-    Returns a PatientData object or raises KeyError if not found.
-    Optimized to only process the requested patient's data.
-    """
-    image_type_mapping = {
-        "右眼眼底": "右眼CFP",
-        "左眼眼底": "左眼CFP",
-        "右眼外观": "右眼外眼照",
-        "左眼外观": "左眼外眼照",
-    }
-    default_image_quality = ""
-    diagnosis_mapping = {
-        "青光眼": "青光眼",
-        "糖尿病性视网膜病变": "糖网",
-        "年龄相关性黄斑变性": "AMD",
-        "病理性近视": "病理性近视",
-        "视网膜静脉阻塞（RVO）": "RVO",
-        "视网膜动脉阻塞（RAO）": "RAO",
-        "视网膜脱离（RD）": "视网膜脱离",
-        "其他视网膜病": "其它视网膜病",
-        "其他黄斑病变": "其它黄斑病变",
-        "白内障": "白内障",
-        "正常": "正常"
-    }
-    prediction_thresholds = EyePredictionThresholds()
-
-    # Load only the JSON data first
-    with open(data_path, "r", encoding="utf-8") as f:
-        all_data = json.load(f)
-    
-    # Check if patient exists before processing
-    if patient_id not in all_data:
-        raise KeyError(f"Patient {patient_id} not found in {data_path}")
-    
-    pdata = all_data[patient_id]
-    
-    # Process only this patient's images
-    eye_images = []
-    for img in pdata.get("images", []):
-        img_type = image_type_mapping.get(img.get("eye", ""), "")
-        img_quality = default_image_quality
-        prefix = os.path.dirname(data_path)
-        img_rel = img.get("img_path", "")
-        full_path = os.path.join(prefix, img_rel)
-        base64_data = read_image(full_path)
-        eye_images.append(ImageInfo(
-            id=f"img_{patient_id}_{img.get('img_path', '')}",
-            type=img_type,
-            quality=img_quality,
-            base64_data=base64_data
-        ))
-
-    # Process prediction results
-    prediction_results = {}
-    ext_cataract_used = {"left_eye": False, "right_eye": False}
-    for eye in ["left_eye", "right_eye"]:
-        cfp_type = "左眼CFP" if eye == "left_eye" else "右眼CFP"
-        ext_type = "左眼外眼照" if eye == "left_eye" else "右眼外眼照"
-        cfp_img = _pick_latest_by_type(pdata.get("images", []), image_type_mapping, cfp_type)
-        ext_img = _pick_latest_by_type(pdata.get("images", []), image_type_mapping, ext_type)
-
-        if cfp_img and cfp_img.get("probs"):
-            cfp_probs = {diagnosis_mapping.get(k, k): v for k, v in cfp_img.get("probs", {}).items()}
-        else:
-            cfp_probs = {disease: 0.0 for disease in diagnosis_mapping.values()}
-
-        ext_probs = None
-        if ext_img and ext_img.get("probs"):
-            ext_probs = {diagnosis_mapping.get(k, k): v for k, v in ext_img.get("probs", {}).items()}
-
-        probs = dict(cfp_probs)
-        if ext_probs is not None and "白内障" in ext_probs:
-            probs["白内障"] = ext_probs["白内障"]
-            ext_cataract_used[eye] = True
-
-        prediction_results[eye] = EyePrediction(**probs)
-
-    # If either eye uses external-eye cataract probability, reflect that in thresholds for UI
-    if ext_cataract_used["left_eye"] or ext_cataract_used["right_eye"]:
-        setattr(prediction_thresholds, "白内障", CATARACT_EXTERNAL_THRESHOLD)
-
-    # Diagnosis results (thresholding)
-    diagnosis_results = {}
-    for eye in ["left_eye", "right_eye"]:
-        diag = {}
-        for disease, threshold in prediction_thresholds.dict().items():
-            if disease == "白内障" and ext_cataract_used.get(eye, False):
-                threshold_to_use = CATARACT_EXTERNAL_THRESHOLD
-            else:
-                threshold_to_use = threshold
-            prob = getattr(prediction_results[eye], disease, 0.0)
-            diag[disease] = prob >= threshold_to_use
-        diagnosis_results[eye] = EyeDiagnosis(**diag)
-
-    return PatientData(
-        patient_id=patient_id,
-        eye_images=eye_images,
-        prediction_results=prediction_results,
-        prediction_thresholds=prediction_thresholds,
-        diagnosis_results=diagnosis_results
-    )
-
-
 
 
 # --- Helper Functions of Initial Demo ---

@@ -1,4 +1,11 @@
 # main.py
+
+import os
+import json
+import datetime
+from typing import List, Dict, Any, Optional
+from pydantic import BaseModel
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -401,6 +408,164 @@ async def add_new_patient_data(patient_data: PatientData):
         patients_data_cache[patient_data.patient_id] = patient_data
         print(f"New patient {patient_data.patient_id} added to cache.")
         return {"status": f"Patient {patient_data.patient_id} added successfully to cache."}
+
+
+# --- Consultation Data Models ---
+class EyeSymptomData(BaseModel):
+    mainSymptom: Optional[str] = None
+    onsetMethod: Optional[str] = None
+    onsetTime: Optional[str] = None
+    accompanyingSymptoms: Optional[List[str]] = None
+    medicalHistory: Optional[str] = None
+    mainSymptomOther: Optional[str] = None
+
+class ConsultationData(BaseModel):
+    name: Optional[str] = None
+    phone: Optional[str] = None
+    affectedArea: Optional[List[str]] = None
+    leftEye: Optional[EyeSymptomData] = None
+    rightEye: Optional[EyeSymptomData] = None
+    bothEyes: Optional[EyeSymptomData] = None
+    submissionTime: Optional[str] = None
+    
+    class Config:
+        arbitrary_types_allowed = True
+
+class SaveConsultationRequest(BaseModel):
+    patient_id: str
+    consultation_data: ConsultationData
+
+# Path to consultation data
+CONSULTATION_DATA_PATH = "../../eye_ai_consultation/data/questionnaire_data.json"
+consultation_data_lock = threading.Lock()
+
+# --- Helper Functions ---
+def load_consultation_data():
+    """Load consultation data from JSON file"""
+    try:
+        if not os.path.exists(CONSULTATION_DATA_PATH):
+            print(f"Consultation data file not found: {CONSULTATION_DATA_PATH}")
+            return []
+            
+        with open(CONSULTATION_DATA_PATH, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"Error loading consultation data: {e}")
+        return []
+
+def save_consultation_data(data):
+    """Save consultation data back to JSON file"""
+    try:
+        os.makedirs(os.path.dirname(CONSULTATION_DATA_PATH), exist_ok=True)
+        with open(CONSULTATION_DATA_PATH, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
+        return True
+    except Exception as e:
+        print(f"Error saving consultation data: {e}")
+        return False
+
+def find_best_matching_consultation(all_data, patient_name, exam_time):
+    """Find best matching consultation entry by name and timestamp"""
+    if not patient_name or not exam_time or not all_data:
+        return None
+        
+    # Convert exam_time to datetime for comparison
+    try:
+        exam_datetime = datetime.datetime.fromisoformat(exam_time.replace('Z', '+00:00'))
+    except (ValueError, TypeError):
+        print(f"Invalid exam time format: {exam_time}")
+        exam_datetime = None
+    
+    # If we can't parse the exam time, just match by name
+    if not exam_datetime:
+        matching_entries = [entry for entry in all_data if entry.get("name") == patient_name]
+        return matching_entries[-1] if matching_entries else None
+    
+    # Find entries with matching name and submission time after exam time
+    matching_entries = []
+    for entry in all_data:
+        if entry.get("name") != patient_name:
+            continue
+            
+        try:
+            submission_time = entry.get("submissionTime")
+            if not submission_time:
+                continue
+                
+            submission_datetime = datetime.datetime.fromisoformat(submission_time.replace('Z', '+00:00'))
+            
+            # Consider entries after the exam time
+            if submission_datetime >= exam_datetime:
+                matching_entries.append((entry, submission_datetime))
+        except (ValueError, TypeError):
+            continue
+    
+    # Sort by closeness to exam time
+    if matching_entries:
+        matching_entries.sort(key=lambda x: x[1])
+        return matching_entries[0][0]  # Return the closest matching entry
+    
+    # If no matches after exam time, return any match by name (most recent)
+    matching_by_name = [entry for entry in all_data if entry.get("name") == patient_name]
+    return matching_by_name[-1] if matching_by_name else None
+
+# --- Consultation Endpoints ---
+@app.get("/api/consultation/{patient_id}")
+async def get_consultation_info(patient_id: str):
+    """Get consultation information for a patient"""
+    with patient_data_lock:
+        # First check if patient exists
+        patient = patients_data_cache.get(patient_id)
+        if not patient:
+            raise HTTPException(status_code=404, detail=f"Patient {patient_id} not found")
+            
+        patient_name = patient.name if hasattr(patient, "name") else None
+        exam_time = patient.examine_time if hasattr(patient, "examine_time") else None
+        
+        if not patient_name:
+            raise HTTPException(status_code=404, detail="Patient has no name information")
+    
+    with consultation_data_lock:
+        # Load consultation data
+        all_consultations = load_consultation_data()
+        if not all_consultations:
+            return {"consultation_data": None, "status": "No consultation data available"}
+        
+        # Find best matching consultation
+        best_match = find_best_matching_consultation(all_consultations, patient_name, exam_time)
+        
+        if best_match:
+            return {"consultation_data": best_match, "status": "success"}
+        else:
+            return {"consultation_data": None, "status": "No matching consultation found"}
+
+@app.post("/api/consultation")
+async def save_consultation_info(request: SaveConsultationRequest):
+    """Save consultation information for a patient"""
+    with patient_data_lock:
+        # First check if patient exists
+        patient = patients_data_cache.get(request.patient_id)
+        if not patient:
+            raise HTTPException(status_code=404, detail=f"Patient {request.patient_id} not found")
+    
+    with consultation_data_lock:
+        # Load existing consultation data
+        all_consultations = load_consultation_data()
+        
+        # Create new consultation entry
+        new_entry = request.consultation_data.dict()
+        
+        # Add current timestamp
+        new_entry["submissionTime"] = datetime.datetime.now().isoformat()
+        
+        # Append to the list
+        all_consultations.append(new_entry)
+        
+        # Save back to file
+        if save_consultation_data(all_consultations):
+            return {"status": "Consultation data saved successfully"}
+        else:
+            raise HTTPException(status_code=500, detail="Failed to save consultation data")
 
 
 # Run the FastAPI application

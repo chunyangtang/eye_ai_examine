@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 # --- Data Models (Pydantic) ---
 class ImageInfo(BaseModel):
@@ -84,11 +84,12 @@ class ManualDiagnosisData(BaseModel):
 
 class PatientData(BaseModel):
     patient_id: str
+    name: Optional[str] = None
+    examine_time: Optional[str] = None
     eye_images: List[ImageInfo]
+    prediction_results: Dict[str, EyePrediction]
+    diagnosis_results: Dict[str, EyeDiagnosis]
     prediction_thresholds: EyePredictionThresholds
-    prediction_results: Dict[str, EyePrediction] # 'left_eye', 'right_eye'
-    diagnosis_results: Dict[str, EyeDiagnosis] # 'left_eye', 'right_eye'
-
 
 class SubmitDiagnosisRequest(BaseModel):
     patient_id: str
