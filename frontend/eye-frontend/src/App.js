@@ -1064,7 +1064,7 @@ function App() {
 
             {/* Unified Interactive Correction Section */}
             <div className="mb-10 p-6 rounded-lg shadow-sm border border-gray-200 bg-white">
-              <h3 className="text-xl font-semibold mb-2 text-gray-800 text-center">人工校正区 (Interactive Human Correction)</h3>
+              <h3 className="text-xl font-semibold mb-2 text-gray-800 text-center">人工复检区 (Re-examination)</h3>
               <p className="text-xs text-gray-500 mb-5 text-center">在此对影像类型/质量与疾病诊断结果进行人工复核与修改 (Review & adjust image metadata and disease diagnoses)</p>
               {/* Image Condition Row */}
               <div className="mb-6">

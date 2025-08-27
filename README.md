@@ -3,7 +3,16 @@
 Obtain newly captured eye images, analyze them using deep learning model, and display the results in an web application.
 
 ## Usage
-### Backend
+
+### Use Automation Script (Recommended)
+
+You can use the provided `start_servers.sh` script to automatically start both the backend and frontend servers. This script will handle port selection and other setup tasks for you.
+
+```bash
+./start_servers.sh
+```
+
+### Manual - Backend
 
 Run the backend server using:
 
@@ -14,7 +23,7 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
 
 keep the terminal open for FastAPI to run on `http://127.0.0.1:8000`.
 
-### Frontend
+### Manual - Frontend
 
 ```bash
 cd frontend/eye-frontend
