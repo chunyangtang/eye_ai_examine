@@ -161,6 +161,16 @@ const ConsultationInfoSection = ({ consultationData, onChange, onSubmit, isSubmi
     return symptoms.map(s => symptomTexts[s] || s).join(", ");
   };
 
+  // Translate gender enum to Chinese for display
+  const toZhGender = (g) => {
+    if (!g) return '';
+    const s = String(g).trim().toLowerCase();
+    if (s === 'male') return '男';
+    if (s === 'female') return '女';
+    if (s === 'other') return '其他';
+    return g; // already human-entered or unknown, keep as-is
+  };
+
   // Helpers
   const ensureEyeField = (data, eye) => {
     const eyeField = eye === 'left' ? 'leftEye' : eye === 'right' ? 'rightEye' : 'bothEyes';
@@ -274,7 +284,29 @@ const ConsultationInfoSection = ({ consultationData, onChange, onSubmit, isSubmi
               className="flex-1 border-b border-gray-300 focus:outline-none focus:border-blue-500 px-1"
             />
           </div>
-          
+
+          <div className="flex">
+            <span className="w-24 text-gray-600">年龄 (Age):</span>
+            <input
+              type="text"
+              value={consultationData.age || ''}
+              onChange={e => handleChange('age', e.target.value)}
+              placeholder="例如 62"
+              className="flex-1 border-b border-gray-300 focus:outline-none focus:border-blue-500 px-1"
+            />
+          </div>
+
+          <div className="flex">
+            <span className="w-24 text-gray-600">性别 (Gender):</span>
+            <input
+              type="text"
+              value={toZhGender(consultationData.gender || '')}
+              onChange={e => handleChange('gender', e.target.value)}
+              placeholder="男 / 女 / 其他"
+              className="flex-1 border-b border-gray-300 focus:outline-none focus:border-blue-500 px-1"
+            />
+          </div>
+
           <div className="flex">
             <span className="w-24 text-gray-600">电话 (Phone):</span>
             <input 
@@ -428,6 +460,129 @@ function App() {
     right_eye: ''
   });
   const [diagnosisNotes, setDiagnosisNotes] = useState('');
+
+  // NEW: Right-side LLM Chat (Demo)
+  const [sideChatMessages, setSideChatMessages] = useState([]);
+  const [sideChatInput, setSideChatInput] = useState('');
+  const sideChatEndRef = useRef(null);
+
+  useEffect(() => {
+    sideChatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [sideChatMessages]);
+
+  // Helper to list positives in manual diagnosis
+  const listManualPositives = (eyeKey) => {
+    const selected = Object.entries(manualDiagnosis?.[eyeKey] || {})
+      .filter(([, v]) => !!v)
+      .map(([k]) => k);
+    const custom = (customDiseases?.[eyeKey] || '').trim();
+    if (custom) selected.push(custom);
+    return selected;
+  };
+
+  // Build a short clinical opinion from latest state (demo)
+  const buildDemoMedicalOpinion = () => {
+    const name = patientData?.name || '患者';
+    const leftHi = getEyeHighlights('left_eye');
+    const rightHi = getEyeHighlights('right_eye');
+
+    // Compose eye text
+    const eyeBlock = (eyeLabel, hi) => {
+      const primaryNames = (hi.primaries || []).map(p => p.key === '正常' ? '正常' : p.name);
+      const secNames = (hi.secondaries || []).map(s => s.name);
+      let s = `${eyeLabel}：`;
+      if (primaryNames.length === 0) {
+        s += '未见明确高概率疾病倾向';
+      } else if (primaryNames[0] === '正常') {
+        s += '整体倾向正常';
+      } else {
+        s += `首要考虑 ${primaryNames.join('、')}`;
+      }
+      if (secNames.length > 0) s += `；需留意 ${secNames.join('、')}`;
+      return s + '。';
+    };
+
+    // Consultation snippet
+    const cons = consultationDataEdited || {};
+    const affected = Array.isArray(cons.affectedArea) ? cons.affectedArea : [];
+    const consultBits = [];
+    if (affected.length > 0) {
+      const tag = affected.map(a => a === 'left' ? '左眼' : a === 'right' ? '右眼' : '双眼').join('、');
+      consultBits.push(`受累部位：${tag}`);
+    }
+    const leftMain = cons.leftEye?.mainSymptom;
+    const rightMain = cons.rightEye?.mainSymptom;
+    const bothMain = cons.bothEyes?.mainSymptom;
+    const mainSymTxt = [leftMain && `左眼主要症状：${leftMain}`, rightMain && `右眼主要症状：${rightMain}`, bothMain && `双眼主要症状：${bothMain}`]
+      .filter(Boolean).join('；');
+    if (mainSymTxt) consultBits.push(mainSymTxt);
+
+    // Manual diagnosis picks
+    const mLeft = listManualPositives('left_eye');
+    const mRight = listManualPositives('right_eye');
+
+    const blocks = [
+      `临床意见（演示）：${name}当前AI与人工复核结果如下。`,
+      eyeBlock('左眼', leftHi),
+      eyeBlock('右眼', rightHi),
+    ];
+    if (consultBits.length > 0) blocks.push(`问诊要点：${consultBits.join('；')}。`);
+    if (mLeft.length > 0 || mRight.length > 0) {
+      const parts = [];
+      if (mLeft.length > 0) parts.push(`左眼人工诊断：${mLeft.join('、')}`);
+      if (mRight.length > 0) parts.push(`右眼人工诊断：${mRight.join('、')}`);
+      blocks.push(parts.join('；') + '。');
+    }
+    if (diagnosisNotes.trim()) blocks.push(`医生备注：${diagnosisNotes.trim()}`);
+
+    blocks.push('建议结合裂隙灯/眼底镜等进一步检查，并与临床症状体征综合评估。');
+    return blocks.join('\n');
+  };
+
+  const regenerateSideOpinion = () => {
+    const opinion = buildDemoMedicalOpinion();
+    const ts = new Date().toLocaleString();
+    setSideChatMessages(prev => [
+      ...prev,
+      { role: 'assistant', content: `【已基于最新结果重新生成 ${ts}】\n${opinion}` }
+    ]);
+  };
+
+  const sendSideChat = () => {
+    const q = sideChatInput.trim();
+    if (!q) return;
+    setSideChatInput('');
+    setSideChatMessages(prev => [...prev, { role: 'user', content: q }]);
+    // Demo canned response
+    const leftTop = (getEyeHighlights('left_eye').primaries[0]?.name) || '正常';
+    const rightTop = (getEyeHighlights('right_eye').primaries[0]?.name) || '正常';
+    const reply = `（演示）已记录问题：“${q}”。结合当前要点：左眼「${leftTop}」、右眼「${rightTop}」。如需正式建议，请完善检查与随访计划。`;
+    // Simulate slight delay
+    setTimeout(() => {
+      setSideChatMessages(prev => [...prev, { role: 'assistant', content: reply }]);
+    }, 250);
+  };
+
+  // On first load of patient, seed demo messages
+  useEffect(() => {
+    if (patientData && sideChatMessages.length === 0) {
+      setSideChatMessages([
+        {
+          role: 'assistant',
+          content:
+            '临床助手（演示）：【诊断推理过程】\n' +
+            '患者为 62 岁女性，高血压和糖尿病史，主诉双眼渐进性视物模糊 4 个月伴视物变形，结合神经网络模型对 CFP 的预测结果：右眼明确为年龄相关性黄斑病变（AMD），与患者年龄、典型视物变形症状契合，且高血压、糖尿病可能诱发 AMD 进展及视网膜动脉阻塞，需排除其他黄斑病变干扰；左眼 “其他黄斑病变接近阈值”，虽症状与右眼一致但病变类型未明，需排查非 AMD 类黄斑病变，同时因全身血管疾病，需关注左眼早期 AMD 及视网膜动脉阻塞的隐匿风险。'
+        },
+        {
+          role: 'assistant',
+          content:
+            '临床助手（演示）：【检查与治疗建议】\n' +
+            '优先完善 OCT（明确双眼黄斑结构异常）、FFA（评估视网膜血管及右眼 AMD 类型），监测血压、血糖、血脂；治疗上，右眼干性 AMD 口服抗氧化剂，湿性 AMD 行抗 VEGF 注射，左眼暂不针对性用药，口服改善微循环药预防动脉阻塞（告知突发视力下降 1 小时内急诊），同时控制饮食、适度运动、外出戴防蓝光镜；随访需左眼每 1-2 个月查 OCT，双眼每 3 个月查 CFP，动态调整诊疗方案。'
+        }
+      ]);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [patientData]); // seed once per patient
 
   // Get ris_exam_id from URL parameters
   const urlParams = new URLSearchParams(window.location.search);
@@ -1296,163 +1451,210 @@ function App() {
               </div>
             </div>
 
-            {/* AI Highlights Section */}
-            <div className="mb-8 p-6 rounded-2xl shadow-sm border border-indigo-300 bg-indigo-50/60">
-              <h3 className="text-2xl font-bold mb-4 text-indigo-900 text-center tracking-tight">
-                AI检查摘要 (AI Examination Summary)
-              </h3>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-                {['left_eye','right_eye'].map((eyeKey) => {
-                  const eyeLabel = eyeKey === 'left_eye' ? '左眼 (Left Eye)' : '右眼 (Right Eye)';
-                  const { primaries, secondaries } = getEyeHighlights(eyeKey);
-                  const statusTextMap = {
-                    '明显偏高': '明显高于阈值 / Markedly above T',
-                    '较高': '高于阈值 / Above T',
-                    '接近阈值': '接近阈值 / Near T',
-                    '较低': '低于阈值 / Below T',
-                  };
-                  return (
-                    <div key={eyeKey} className="p-5 rounded-xl bg-white border border-indigo-200 shadow-sm">
-                      <div className="text-sm font-semibold text-gray-800 mb-3">{eyeLabel}</div>
-                      {primaries.length > 0 ? (
-                        <div>
-                          {/* Primaries: show all above-threshold or the top one if none above */}
-                          <div className="flex flex-col gap-3">
-                            {primaries.map((pItem) => (
-                              pItem.key === '正常' ? (
-                                <div key={pItem.key}>
-                                  <div className="mt-1 text-xs text-gray-600">总体判断 (Overall)</div>
-                                  <div className="text-xl md:text-2xl font-semibold text-green-700">正常 (Normal)</div>
-                                </div>
-                              ) : (
-                                <div key={pItem.key}>
-                                  <div className="text-xs text-gray-600">首要考虑 (Primary)</div>
-                                  <div className="text-lg md:text-xl font-semibold text-gray-900">{pItem.name}</div>
-                                  <div className="flex items-center gap-2 mt-1">
-                                    <span className="inline-flex items-center px-2 py-0.5 rounded bg-blue-50 text-blue-800 text-xs border border-blue-200">
-                                      P {formatProb(pItem.p)} · T {formatProb(pItem.t)}
-                                    </span>
-                                    <span className={
-                                      `inline-flex items-center px-2 py-0.5 rounded text-xs border ${
-                                        pItem.status === '明显偏高' ? 'bg-red-50 text-red-800 border-red-200' :
-                                        pItem.status === '较高' ? 'bg-orange-50 text-orange-800 border-orange-200' :
-                                        pItem.status === '接近阈值' ? 'bg-yellow-50 text-yellow-800 border-yellow-200' :
-                                        'bg-gray-50 text-gray-700 border-gray-200'
-                                      }`
-                                    }>
-                                      {statusTextMap[pItem.status] || pItem.status}
-                                    </span>
-                                  </div>
-                                </div>
-                              )
-                            ))}
-                          </div>
-
-                          {/* Secondaries: at most 2 chips, may be none; show even if Normal is primary */}
-                          {secondaries.length > 0 && (
-                            <div className="mt-3">
-                              <div className="text-xs font-medium text-gray-500 tracking-wide">次要关注 (Secondary)</div>
-                              <div className="mt-2 flex flex-wrap gap-2">
-                                {secondaries.map((o) => (
-                                  <span
-                                    key={o.key}
-                                    className="px-2.5 py-1 rounded-full bg-amber-400/10 text-amber-700 text-xs border border-amber-300/40 opacity-85"
-                                  >
-                                    {o.name}
-                                  </span>
+            {/* Wrap AI sections and add right-side chat panel */}
+            <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
+              {/* Left: AI Highlights + Probabilities */}
+              <div className="xl:col-span-2 space-y-6">
+                {/* AI Highlights Section (moved inside) */}
+                <div className="mb-0 p-6 rounded-2xl shadow-sm border border-indigo-300 bg-indigo-50/60">
+                  <h3 className="text-2xl font-bold mb-4 text-indigo-900 text-center tracking-tight">
+                    AI检查摘要 (AI Examination Summary)
+                  </h3>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                    {['left_eye','right_eye'].map((eyeKey) => {
+                      const eyeLabel = eyeKey === 'left_eye' ? '左眼 (Left Eye)' : '右眼 (Right Eye)';
+                      const { primaries, secondaries } = getEyeHighlights(eyeKey);
+                      const statusTextMap = {
+                        '明显偏高': '明显高于阈值 / Markedly above T',
+                        '较高': '高于阈值 / Above T',
+                        '接近阈值': '接近阈值 / Near T',
+                        '较低': '低于阈值 / Below T',
+                      };
+                      return (
+                        <div key={eyeKey} className="p-5 rounded-xl bg-white border border-indigo-200 shadow-sm">
+                          <div className="text-sm font-semibold text-gray-800 mb-3">{eyeLabel}</div>
+                          {primaries.length > 0 ? (
+                            <div>
+                              {/* Primaries: show all above-threshold or the top one if none above */}
+                              <div className="flex flex-col gap-3">
+                                {primaries.map((pItem) => (
+                                  pItem.key === '正常' ? (
+                                    <div key={pItem.key}>
+                                      <div className="mt-1 text-xs text-gray-600">总体判断 (Overall)</div>
+                                      <div className="text-xl md:text-2xl font-semibold text-green-700">正常 (Normal)</div>
+                                    </div>
+                                  ) : (
+                                    <div key={pItem.key}>
+                                      <div className="text-xs text-gray-600">首要考虑 (Primary)</div>
+                                      <div className="text-lg md:text-xl font-semibold text-gray-900">{pItem.name}</div>
+                                      <div className="flex items-center gap-2 mt-1">
+                                        <span className="inline-flex items-center px-2 py-0.5 rounded bg-blue-50 text-blue-800 text-xs border border-blue-200">
+                                          P {formatProb(pItem.p)} · T {formatProb(pItem.t)}
+                                        </span>
+                                        <span className={
+                                          `inline-flex items-center px-2 py-0.5 rounded text-xs border ${
+                                            pItem.status === '明显偏高' ? 'bg-red-50 text-red-800 border-red-200' :
+                                            pItem.status === '较高' ? 'bg-orange-50 text-orange-800 border-orange-200' :
+                                            pItem.status === '接近阈值' ? 'bg-yellow-50 text-yellow-800 border-yellow-200' :
+                                            'bg-gray-50 text-gray-700 border-gray-200'
+                                          }`
+                                        }>
+                                          {statusTextMap[pItem.status] || pItem.status}
+                                        </span>
+                                      </div>
+                                    </div>
+                                  )
                                 ))}
                               </div>
+
+                              {secondaries.length > 0 && (
+                                <div className="mt-3">
+                                  <div className="text-xs font-medium text-gray-500 tracking-wide">次要关注 (Secondary)</div>
+                                  <div className="mt-2 flex flex-wrap gap-2">
+                                    {secondaries.map((o) => (
+                                      <span
+                                        key={o.key}
+                                        className="px-2.5 py-1 rounded-full bg-amber-400/10 text-amber-700 text-xs border border-amber-300/40 opacity-85"
+                                      >
+                                        {o.name}
+                                      </span>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
                             </div>
+                          ) : (
+                            <div className="text-sm text-gray-500">暂无要点 (No highlights)</div>
                           )}
                         </div>
-                      ) : (
-                        <div className="text-sm text-gray-500">暂无要点 (No highlights)</div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-
-            {/* Prediction Probability Bars Section */}
-            <div className="mb-8 p-5 rounded-lg shadow-sm border border-gray-100 bg-white">
-              <h3 className="text-lg font-semibold mb-3 text-gray-700 text-center">AI预测概率 (Model Prediction Probabilities)</h3>
-              <p className="text-xs text-gray-500 mb-4 text-center">彩条长度按阈值重新映射: 阈值位于条形中点 (50%)，左侧表示低于阈值，右侧高于阈值。</p>
-              <div className="overflow-x-auto">
-                <table className="min-w-full table-fixed text-xs md:text-sm">
-                  <thead>
-                    <tr>
-                      <th className="w-40 p-2 text-left text-gray-600 font-medium">疾病 (Disease)</th>
-                      <th className="p-2 text-center text-gray-600 font-medium">左眼 (Left)</th>
-                      <th className="p-2 text-center text-gray-600 font-medium">右眼 (Right)</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {diseaseOrder.map(dk => {
-                      const thresholds = patientData?.prediction_thresholds || {};
-                      const t = thresholds[dk] ?? 0.5; // fallback
-                      const leftProb = patientData?.prediction_results?.left_eye?.[dk] ?? 0.0;
-                      const rightProb = patientData?.prediction_results?.right_eye?.[dk] ?? 0.0;
-                      const leftWidthRaw = mapProbToWidth(leftProb, t) * 100;
-                      const rightWidthRaw = mapProbToWidth(rightProb, t) * 100;
-                      const clamp = (v) => Math.min(100, Math.max(0, v));
-                      const leftWidth = clamp(leftWidthRaw);
-                      const rightWidth = clamp(rightWidthRaw);
-                      return (
-                        <tr key={dk} className="border-t border-gray-100">
-                          <td className="p-2 align-middle text-gray-700 whitespace-nowrap font-medium">
-                            <div className="flex flex-col">
-                              <span className="text-sm font-semibold text-gray-800">{diseaseInfo[dk].chinese}</span>
-                              <span className="text-xs text-gray-500">{diseaseInfo[dk].english}</span>
-                            </div>
-                          </td>
-                          {/* Left eye bar */}
-                          <td className="p-2">
-                            <div className="relative h-5 rounded-full bg-gradient-to-r from-green-300 via-yellow-300 to-red-400 overflow-hidden shadow-inner">
-                              {/* Fill overlay */}
-                              <div className="absolute top-0 left-0 h-full bg-green-600/20" style={{ width: `${leftWidth}%` }} />
-                              {/* Threshold marker at 50% */}
-                              <div className="absolute top-0 left-1/2 w-0.5 h-full bg-gray-600/70" />
-                              {/* Probability marker (line + diamond) */}
-                              <div className="absolute top-0 h-full flex items-center" style={{ left: `${leftWidth}%`, transform: 'translateX(-50%)' }}
-                                   title={`${diseaseInfo[dk].fullName}: P:${formatProb(leftProb)} T:${formatProb(t)}`}
-                                   aria-label={`Left eye ${diseaseInfo[dk].fullName} probability ${formatProb(leftProb)}, threshold ${formatProb(t)}`}>
-                                <div className="w-0.5 h-full bg-blue-700/70"></div>
-                                <div className="absolute left-1/2 top-1/2 w-3 h-3 -translate-x-1/2 -translate-y-1/2 rotate-45 bg-blue-600 border border-white shadow-sm" />
-                              </div>
-                              {/* Labels */}
-                              <div className="absolute inset-0 flex justify-between px-1 text-[10px] leading-5 text-gray-600 select-none font-medium">
-                                <span>{formatProb(leftProb)}</span>
-                                <span className="text-gray-500">T:{formatProb(t)}</span>
-                              </div>
-                            </div>
-                          </td>
-                          {/* Right eye bar */}
-                          <td className="p-2">
-                            <div className="relative h-5 rounded-full bg-gradient-to-r from-green-300 via-yellow-300 to-red-400 overflow-hidden shadow-inner">
-                              <div className="absolute top-0 left-0 h-full bg-green-600/20" style={{ width: `${rightWidth}%` }} />
-                              <div className="absolute top-0 left-1/2 w-0.5 h-full bg-gray-600/70" />
-                              <div className="absolute top-0 h-full flex items-center" style={{ left: `${rightWidth}%`, transform: 'translateX(-50%)' }}
-                                   title={`${diseaseInfo[dk].fullName}: P:${formatProb(rightProb)} T:${formatProb(t)}`}
-                                   aria-label={`Right eye ${diseaseInfo[dk].fullName} probability ${formatProb(rightProb)}, threshold ${formatProb(t)}`}>
-                                <div className="w-0.5 h-full bg-blue-700/70"></div>
-                                <div className="absolute left-1/2 top-1/2 w-3 h-3 -translate-x-1/2 -translate-y-1/2 rotate-45 bg-blue-600 border border-white shadow-sm" />
-                              </div>
-                              <div className="absolute inset-0 flex justify-between px-1 text-[10px] leading-5 text-gray-600 select-none font-medium">
-                                <span>{formatProb(rightProb)}</span>
-                                <span className="text-gray-500">T:{formatProb(t)}</span>
-                              </div>
-                            </div>
-                          </td>
-                        </tr>
                       );
                     })}
-                  </tbody>
-                </table>
+                  </div>
+                </div>
+
+                {/* Prediction Probability Bars Section (moved inside) */}
+                <div className="mb-0 p-5 rounded-lg shadow-sm border border-gray-100 bg-white">
+                  <h3 className="text-lg font-semibold mb-3 text-gray-700 text-center">AI预测概率 (Model Prediction Probabilities)</h3>
+                  <p className="text-xs text-gray-500 mb-4 text-center">彩条长度按阈值重新映射: 阈值位于条形中点 (50%)，左侧表示低于阈值，右侧高于阈值。</p>
+                  <div className="overflow-x-auto">
+                    <table className="min-w-full table-fixed text-xs md:text-sm">
+                      <thead>
+                        <tr>
+                          <th className="w-40 p-2 text-left text-gray-600 font-medium">疾病 (Disease)</th>
+                          <th className="p-2 text-center text-gray-600 font-medium">左眼 (Left)</th>
+                          <th className="p-2 text-center text-gray-600 font-medium">右眼 (Right)</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {diseaseOrder.map(dk => {
+                          const thresholds = patientData?.prediction_thresholds || {};
+                          const t = thresholds[dk] ?? 0.5;
+                          const leftProb = patientData?.prediction_results?.left_eye?.[dk] ?? 0.0;
+                          const rightProb = patientData?.prediction_results?.right_eye?.[dk] ?? 0.0;
+                          const leftWidthRaw = mapProbToWidth(leftProb, t) * 100;
+                          const rightWidthRaw = mapProbToWidth(rightProb, t) * 100;
+                          const clamp = (v) => Math.min(100, Math.max(0, v));
+                          const leftWidth = clamp(leftWidthRaw);
+                          const rightWidth = clamp(rightWidthRaw);
+                          return (
+                            <tr key={dk} className="border-t border-gray-100">
+                              <td className="p-2 align-middle text-gray-700 whitespace-nowrap font-medium">
+                                <div className="flex flex-col">
+                                  <span className="text-sm font-semibold text-gray-800">{diseaseInfo[dk].chinese}</span>
+                                  <span className="text-xs text-gray-500">{diseaseInfo[dk].english}</span>
+                                </div>
+                              </td>
+                              <td className="p-2">
+                                <div className="relative h-5 rounded-full bg-gradient-to-r from-green-300 via-yellow-300 to-red-400 overflow-hidden shadow-inner">
+                                  <div className="absolute top-0 left-0 h-full bg-green-600/20" style={{ width: `${leftWidth}%` }} />
+                                  <div className="absolute top-0 left-1/2 w-0.5 h-full bg-gray-600/70" />
+                                  <div className="absolute top-0 h-full flex items-center" style={{ left: `${leftWidth}%`, transform: 'translateX(-50%)' }}
+                                       title={`${diseaseInfo[dk].fullName}: P:${formatProb(leftProb)} T:${formatProb(t)}`}
+                                       aria-label={`Left eye ${diseaseInfo[dk].fullName} probability ${formatProb(leftProb)}, threshold ${formatProb(t)}`}>
+                                    <div className="w-0.5 h-full bg-blue-700/70"></div>
+                                    <div className="absolute left-1/2 top-1/2 w-3 h-3 -translate-x-1/2 -translate-y-1/2 rotate-45 bg-blue-600 border border-white shadow-sm" />
+                                  </div>
+                                  <div className="absolute inset-0 flex justify-between px-1 text-[10px] leading-5 text-gray-600 select-none font-medium">
+                                    <span>{formatProb(leftProb)}</span>
+                                    <span className="text-gray-500">T:{formatProb(t)}</span>
+                                  </div>
+                                </div>
+                              </td>
+                              <td className="p-2">
+                                <div className="relative h-5 rounded-full bg-gradient-to-r from-green-300 via-yellow-300 to-red-400 overflow-hidden shadow-inner">
+                                  <div className="absolute top-0 left-0 h-full bg-green-600/20" style={{ width: `${rightWidth}%` }} />
+                                  <div className="absolute top-0 left-1/2 w-0.5 h-full bg-gray-600/70" />
+                                  <div className="absolute top-0 h-full flex items-center" style={{ left: `${rightWidth}%`, transform: 'translateX(-50%)' }}
+                                       title={`${diseaseInfo[dk].fullName}: P:${formatProb(rightProb)} T:${formatProb(t)}`}
+                                       aria-label={`Right eye ${diseaseInfo[dk].fullName} probability ${formatProb(rightProb)}, threshold ${formatProb(t)}`}>
+                                    <div className="w-0.5 h-full bg-blue-700/70"></div>
+                                    <div className="absolute left-1/2 top-1/2 w-3 h-3 -translate-x-1/2 -translate-y-1/2 rotate-45 bg-blue-600 border border-white shadow-sm" />
+                                  </div>
+                                  <div className="absolute inset-0 flex justify-between px-1 text-[10px] leading-5 text-gray-600 select-none font-medium">
+                                    <span>{formatProb(rightProb)}</span>
+                                    <span className="text-gray-500">T:{formatProb(t)}</span>
+                                  </div>
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+
+              {/* Right: LLM Chat (Demo) */}
+              <div className="xl:col-span-1">
+                <div className="p-5 rounded-xl bg-white border border-gray-200 shadow-sm h-full flex flex-col">
+                  <div className="flex items-center justify-between mb-3">
+                    <h3 className="text-lg font-semibold text-gray-800">临床助手（演示） / LLM Clinical Assistant (Demo)</h3>
+                    <button
+                      className="px-3 py-1.5 text-xs rounded bg-blue-600 text-white hover:bg-blue-700"
+                      onClick={regenerateSideOpinion}
+                    >
+                      更新最新结果
+                    </button>
+                  </div>
+                  <div className="text-xs text-gray-500 mb-3">
+                    基于最新问诊、AI与人工复核生成的意见；可点击更新，或在下方继续提问。
+                  </div>
+                  <div className="flex-1 overflow-y-auto border border-gray-200 rounded p-2 bg-gray-50">
+                    {sideChatMessages.length === 0 && (
+                      <div className="text-gray-400 text-sm">暂无对话</div>
+                    )}
+                    {sideChatMessages.map((m, i) => (
+                      <div key={i} className={`mb-2 ${m.role === 'user' ? 'text-right' : 'text-left'}`}>
+                        <span className={`inline-block px-2 py-1 rounded ${
+                          m.role === 'user' ? 'bg-blue-100 text-blue-900' : 'bg-white text-gray-800 border border-gray-200'
+                        }`}>
+                          {m.content}
+                        </span>
+                      </div>
+                    ))}
+                    <div ref={sideChatEndRef} />
+                  </div>
+                  <div className="mt-3 flex gap-2">
+                    <input
+                      className="flex-1 border border-gray-300 rounded px-3 py-2 text-sm"
+                      placeholder="在此输入问题…"
+                      value={sideChatInput}
+                      onChange={(e) => setSideChatInput(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === 'Enter') sendSideChat(); }}
+                    />
+                    <button
+                      className="px-3 py-2 rounded bg-blue-600 text-white text-sm hover:bg-blue-700"
+                      onClick={sendSideChat}
+                    >
+                      发送
+                    </button>
+                  </div>
+                </div>
               </div>
             </div>
 
-            {/* Unified Interactive Correction Section */}
+            {/* Unified Interactive Correction Section (unchanged) */}
             <div className="mb-10 p-6 rounded-lg shadow-sm border border-gray-200 bg-white">
               <h3 className="text-xl font-semibold mb-2 text-gray-800 text-center">人工复检区 (Re-examination)</h3>
               <p className="text-xs text-gray-500 mb-5 text-center">在此对影像类型/质量与疾病诊断结果进行人工复核与修改 (Review & adjust image metadata and disease diagnoses)</p>

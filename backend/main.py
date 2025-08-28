@@ -421,6 +421,8 @@ class EyeSymptomData(BaseModel):
 
 class ConsultationData(BaseModel):
     name: Optional[str] = None
+    age: Optional[str] = None
+    gender: Optional[str] = None
     phone: Optional[str] = None
     affectedArea: Optional[List[str]] = None
     leftEye: Optional[EyeSymptomData] = None
