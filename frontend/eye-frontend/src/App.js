@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 
 // Reusable Button Component
 const IconButton = ({ children, onClick, className = '' }) => (
@@ -461,138 +461,217 @@ function App() {
   });
   const [diagnosisNotes, setDiagnosisNotes] = useState('');
 
-  // NEW: Right-side LLM Chat (Demo)
+  // Right-side LLM Chat (Demo)
   const [sideChatMessages, setSideChatMessages] = useState([]);
   const [sideChatInput, setSideChatInput] = useState('');
-  const sideChatEndRef = useRef(null);
+  const [llmLoading, setLlmLoading] = useState(false);
+  const [llmAbortCtrl, setLlmAbortCtrl] = useState(null);
 
-  useEffect(() => {
-    sideChatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [sideChatMessages]);
+  // Separate scroll area for chat
+  const sideChatScrollRef = useRef(null);
+  const [autoScrollChat, setAutoScrollChat] = useState(true);
 
-  // Helper to list positives in manual diagnosis
-  const listManualPositives = (eyeKey) => {
-    const selected = Object.entries(manualDiagnosis?.[eyeKey] || {})
-      .filter(([, v]) => !!v)
-      .map(([k]) => k);
-    const custom = (customDiseases?.[eyeKey] || '').trim();
-    if (custom) selected.push(custom);
-    return selected;
-  };
-
-  // Build a short clinical opinion from latest state (demo)
-  const buildDemoMedicalOpinion = () => {
-    const name = patientData?.name || '患者';
-    const leftHi = getEyeHighlights('left_eye');
-    const rightHi = getEyeHighlights('right_eye');
-
-    // Compose eye text
-    const eyeBlock = (eyeLabel, hi) => {
-      const primaryNames = (hi.primaries || []).map(p => p.key === '正常' ? '正常' : p.name);
-      const secNames = (hi.secondaries || []).map(s => s.name);
-      let s = `${eyeLabel}：`;
-      if (primaryNames.length === 0) {
-        s += '未见明确高概率疾病倾向';
-      } else if (primaryNames[0] === '正常') {
-        s += '整体倾向正常';
-      } else {
-        s += `首要考虑 ${primaryNames.join('、')}`;
-      }
-      if (secNames.length > 0) s += `；需留意 ${secNames.join('、')}`;
-      return s + '。';
-    };
-
-    // Consultation snippet
-    const cons = consultationDataEdited || {};
-    const affected = Array.isArray(cons.affectedArea) ? cons.affectedArea : [];
-    const consultBits = [];
-    if (affected.length > 0) {
-      const tag = affected.map(a => a === 'left' ? '左眼' : a === 'right' ? '右眼' : '双眼').join('、');
-      consultBits.push(`受累部位：${tag}`);
-    }
-    const leftMain = cons.leftEye?.mainSymptom;
-    const rightMain = cons.rightEye?.mainSymptom;
-    const bothMain = cons.bothEyes?.mainSymptom;
-    const mainSymTxt = [leftMain && `左眼主要症状：${leftMain}`, rightMain && `右眼主要症状：${rightMain}`, bothMain && `双眼主要症状：${bothMain}`]
-      .filter(Boolean).join('；');
-    if (mainSymTxt) consultBits.push(mainSymTxt);
-
-    // Manual diagnosis picks
-    const mLeft = listManualPositives('left_eye');
-    const mRight = listManualPositives('right_eye');
-
-    const blocks = [
-      `临床意见（演示）：${name}当前AI与人工复核结果如下。`,
-      eyeBlock('左眼', leftHi),
-      eyeBlock('右眼', rightHi),
-    ];
-    if (consultBits.length > 0) blocks.push(`问诊要点：${consultBits.join('；')}。`);
-    if (mLeft.length > 0 || mRight.length > 0) {
-      const parts = [];
-      if (mLeft.length > 0) parts.push(`左眼人工诊断：${mLeft.join('、')}`);
-      if (mRight.length > 0) parts.push(`右眼人工诊断：${mRight.join('、')}`);
-      blocks.push(parts.join('；') + '。');
-    }
-    if (diagnosisNotes.trim()) blocks.push(`医生备注：${diagnosisNotes.trim()}`);
-
-    blocks.push('建议结合裂隙灯/眼底镜等进一步检查，并与临床症状体征综合评估。');
-    return blocks.join('\n');
-  };
-
-  const regenerateSideOpinion = () => {
-    const opinion = buildDemoMedicalOpinion();
-    const ts = new Date().toLocaleString();
-    setSideChatMessages(prev => [
-      ...prev,
-      { role: 'assistant', content: `【已基于最新结果重新生成 ${ts}】\n${opinion}` }
-    ]);
-  };
-
-  const sendSideChat = () => {
-    const q = sideChatInput.trim();
-    if (!q) return;
-    setSideChatInput('');
-    setSideChatMessages(prev => [...prev, { role: 'user', content: q }]);
-    // Demo canned response
-    const leftTop = (getEyeHighlights('left_eye').primaries[0]?.name) || '正常';
-    const rightTop = (getEyeHighlights('right_eye').primaries[0]?.name) || '正常';
-    const reply = `（演示）已记录问题：“${q}”。结合当前要点：左眼「${leftTop}」、右眼「${rightTop}」。如需正式建议，请完善检查与随访计划。`;
-    // Simulate slight delay
-    setTimeout(() => {
-      setSideChatMessages(prev => [...prev, { role: 'assistant', content: reply }]);
-    }, 250);
-  };
-
-  // On first load of patient, seed demo messages
-  useEffect(() => {
-    if (patientData && sideChatMessages.length === 0) {
-      setSideChatMessages([
-        {
-          role: 'assistant',
-          content:
-            '临床助手（演示）：【诊断推理过程】\n' +
-            '患者为 62 岁女性，高血压和糖尿病史，主诉双眼渐进性视物模糊 4 个月伴视物变形，结合神经网络模型对 CFP 的预测结果：右眼明确为年龄相关性黄斑病变（AMD），与患者年龄、典型视物变形症状契合，且高血压、糖尿病可能诱发 AMD 进展及视网膜动脉阻塞，需排除其他黄斑病变干扰；左眼 “其他黄斑病变接近阈值”，虽症状与右眼一致但病变类型未明，需排查非 AMD 类黄斑病变，同时因全身血管疾病，需关注左眼早期 AMD 及视网膜动脉阻塞的隐匿风险。'
-        },
-        {
-          role: 'assistant',
-          content:
-            '临床助手（演示）：【检查与治疗建议】\n' +
-            '优先完善 OCT（明确双眼黄斑结构异常）、FFA（评估视网膜血管及右眼 AMD 类型），监测血压、血糖、血脂；治疗上，右眼干性 AMD 口服抗氧化剂，湿性 AMD 行抗 VEGF 注射，左眼暂不针对性用药，口服改善微循环药预防动脉阻塞（告知突发视力下降 1 小时内急诊），同时控制饮食、适度运动、外出戴防蓝光镜；随访需左眼每 1-2 个月查 OCT，双眼每 3 个月查 CFP，动态调整诊疗方案。'
-        }
-      ]);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [patientData]); // seed once per patient
-
-  // Get ris_exam_id from URL parameters
+  // Build backend URL and patient id
+  const backendHost = window.location.hostname;
+  const backendUrl = `http://${backendHost}:8000`;
   const urlParams = new URLSearchParams(window.location.search);
   const currentExamId = urlParams.get('ris_exam_id');
 
-  // Dynamically determine the backend URL
-  // Use the same hostname as the frontend, but on port 8000
-  // Fallback to localhost for local development
-  const backendHost = window.location.hostname;
-  const backendUrl = `http://${backendHost}:8000`;
+  // Prefer patientData.patient_id; fallback to patientData.id; else ris_exam_id
+  const getCurrentPatientId = useMemo(() => {
+    return () => (patientData?.patient_id || patientData?.id || currentExamId || '').toString();
+  }, [patientData?.patient_id, patientData?.id, currentExamId]);
+
+  const [llmConfig, setLlmConfig] = useState({ update_prompt: '' });
+
+  // Load LLM prompts config (update_prompt)
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch(`${backendUrl}/api/llm_config`, { cache: 'no-store' });
+        if (res.ok) setLlmConfig(await res.json());
+      } catch {}
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [backendUrl]);
+
+  // Load persisted LLM chat history when patient changes
+  useEffect(() => {
+    const pid = getCurrentPatientId();
+    if (!pid) return;
+    let aborted = false;
+
+    (async () => {
+      try {
+        const res = await fetch(`${backendUrl}/api/llm_context/${pid}`, { cache: 'no-store' });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (aborted) return;
+        const hist = Array.isArray(data?.llm_context?.history) ? data.llm_context.history : [];
+        // keep only well-formed turns
+        const normalized = hist.filter(m => m && typeof m.role === 'string' && typeof m.content === 'string');
+        setSideChatMessages(normalized);
+        // snap to bottom
+        requestAnimationFrame(() => {
+          const el = sideChatScrollRef.current;
+          if (el) {
+            el.scrollTop = el.scrollHeight;
+            setAutoScrollChat(true);
+          }
+        });
+      } catch {}
+    })();
+
+    return () => { aborted = true; };
+  }, [backendUrl, getCurrentPatientId]);
+
+  // Chat scroll handling (only autoscroll if user is at bottom)
+  useEffect(() => {
+    const el = sideChatScrollRef.current;
+    if (!el || !autoScrollChat) return;
+    el.scrollTop = el.scrollHeight;
+  }, [sideChatMessages, autoScrollChat]);
+
+  const handleSideChatScroll = () => {
+    const el = sideChatScrollRef.current;
+    if (!el) return;
+    const threshold = 32;
+    const atBottom = (el.scrollHeight - el.scrollTop - el.clientHeight) <= threshold;
+    setAutoScrollChat(atBottom);
+  };
+
+  // Streaming send with persistence flags
+  const sendSideChatStreaming = async (text, opts = {}) => {
+    const q = (text ?? sideChatInput).trim();
+    const reset = !!opts.reset;
+    if (!q || llmLoading) return;
+
+    if (text === undefined) setSideChatInput('');
+
+    if (reset) {
+      // clear UI first
+      setSideChatMessages([]);
+    }
+
+    // Only send the new user prompt; backend injects system/context/history
+    const history = [{ role: 'user', content: q }];
+
+    // Append placeholder
+    setSideChatMessages(prev => [
+      ...(reset ? [] : prev),
+      { role: 'user', content: q },
+      { role: 'assistant', content: '' },
+    ]);
+
+    const controller = new AbortController();
+    setLlmAbortCtrl(controller);
+    setLlmLoading(true);
+
+    let gotAny = false;
+
+    try {
+      const payload = {
+        patient_id: getCurrentPatientId(),
+        messages: history,
+        persist: true,
+        reset,
+      };
+
+      const resp = await fetch(`${backendUrl}/api/llm_chat_stream`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'text/plain' },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+        cache: 'no-store',
+      });
+
+      if (!resp.ok || !resp.body) throw new Error(`HTTP ${resp.status}`);
+
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder('utf-8');
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const chunk = decoder.decode(value, { stream: true });
+        if (!chunk || chunk.trim().length === 0) continue;
+        gotAny = true;
+        setSideChatMessages(prev => {
+          const msgs = [...prev];
+          let idx = msgs.length - 1;
+          while (idx >= 0 && msgs[idx].role !== 'assistant') idx--;
+          if (idx >= 0) msgs[idx] = { ...msgs[idx], content: (msgs[idx].content || '') + chunk };
+          return msgs;
+        });
+      }
+    } catch (e) {
+      if (e.name !== 'AbortError' && !gotAny) {
+        setSideChatMessages(prev => {
+          const msgs = [...prev];
+          let idx = msgs.length - 1;
+          while (idx >= 0 && msgs[idx].role !== 'assistant') idx--;
+          if (idx >= 0) msgs[idx] = { ...msgs[idx], content: '（LLM服务暂不可用，已结束演示流式输出。）' };
+          else msgs.push({ role: 'assistant', content: '（LLM服务暂不可用，已结束演示流式输出。）' });
+          return msgs;
+        });
+      }
+    } finally {
+      setLlmLoading(false);
+      setLlmAbortCtrl(null);
+    }
+  };
+
+  // Update button: clear persisted context on backend, clear UI, then regenerate
+  const regenerateSideOpinion = async () => {
+    const prompt =
+      (llmConfig?.update_prompt && llmConfig.update_prompt.trim()) ||
+      '请基于最新问诊信息、AI预测与人工复检结果，生成简要且可操作的临床意见摘要。';
+
+    const pid = getCurrentPatientId();
+    if (pid) {
+      try { await fetch(`${backendUrl}/api/llm_context/${pid}`, { method: 'DELETE' }); } catch {}
+    }
+    setSideChatMessages([]);     // ensure UI reset immediately
+    setAutoScrollChat(true);
+    await sendSideChatStreaming(prompt, { reset: true });
+  };
+
+  // Remove demo seeding: start with blank chat
+  // useEffect(() => {
+  //   if (patientData && sideChatMessages.length === 0) {
+  //     setSideChatMessages([
+  //       {
+  //         role: 'assistant',
+  //         content:
+  //           '临床助手（演示）：【诊断推理过程】\n' +
+  //           '患者为 62 岁女性，高血压和糖尿病史，主诉双眼渐进性视物模糊 4 个月伴视物变形，结合神经网络模型对 CFP 的预测结果：右眼明确为年龄相关性黄斑病变（AMD），与患者年龄、典型视物变形症状契合，且高血压、糖尿病可能诱发 AMD 进展及视网膜动脉阻塞，需排除其他黄斑病变干扰；左眼 “其他黄斑病变接近阈值”，虽症状与右眼一致但病变类型未明，需排查非 AMD 类黄斑病变，同时因全身血管疾病，需关注左眼早期 AMD 及视网膜动脉阻塞的隐匿风险。'
+  //       },
+  //       {
+  //         role: 'assistant',
+  //         content:
+  //           '临床助手（演示）：【检查与治疗建议】\n' +
+  //           '优先完善 OCT（明确双眼黄斑结构异常）、FFA（评估视网膜血管及右眼 AMD 类型），监测血压、血糖、血脂；治疗上，右眼干性 AMD 口服抗氧化剂，湿性 AMD 行抗 VEGF 注射，左眼暂不针对性用药，口服改善微循环药预防动脉阻塞（告知突发视力下降 1 小时内急诊），同时控制饮食、适度运动、外出戴防蓝光镜；随访需左眼每 1-2 个月查 OCT，双眼每 3 个月查 CFP，动态调整诊疗方案。'
+  //       }
+  //     ]);
+  //   }
+  //   // eslint-disable-next-line react-hooks/exhaustive-deps
+  // }, [patientData]); // seed once per patient
+
+
+  // NEW: fetch LLM prompts/config once
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch(`${backendUrl}/api/llm_config`, { cache: 'no-store' });
+        if (res.ok) {
+          const cfg = await res.json();
+          setLlmConfig(prev => ({ ...prev, ...cfg }));
+        }
+      } catch (e) {
+        console.warn('Failed to load LLM config; using defaults.', e);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [backendUrl]);
 
   const patientIdPrefix = "病例索引 (Case Index): ";
 
@@ -1605,22 +1684,35 @@ function App() {
                 </div>
               </div>
 
-              {/* Right: LLM Chat (Demo) */}
+              {/* Right: LLM Chat (API streaming) */}
               <div className="xl:col-span-1">
                 <div className="p-5 rounded-xl bg-white border border-gray-200 shadow-sm h-full flex flex-col">
-                  <div className="flex items-center justify-between mb-3">
-                    <h3 className="text-lg font-semibold text-gray-800">临床助手（演示） / LLM Clinical Assistant (Demo)</h3>
-                    <button
-                      className="px-3 py-1.5 text-xs rounded bg-blue-600 text-white hover:bg-blue-700"
-                      onClick={regenerateSideOpinion}
-                    >
-                      更新最新结果
-                    </button>
+                  <div className="flex items-center justify-between mb-1">
+                    <h3 className="text-lg font-semibold text-gray-800">临床助手 / LLM Chat</h3>
+                    {!llmLoading ? (
+                      <button
+                        className="px-3 py-1.5 text-xs rounded bg-blue-600 text-white hover:bg-blue-700"
+                        onClick={regenerateSideOpinion}
+                        title="根据最新结果生成摘要"
+                      >
+                        更新最新结果
+                      </button>
+                    ) : (
+                      <button
+                        className="px-3 py-1.5 text-xs rounded bg-red-600 text-white hover:bg-red-700"
+                        onClick={() => llmAbortCtrl?.abort()}
+                        title="停止生成"
+                      >
+                        停止
+                      </button>
+                    )}
                   </div>
-                  <div className="text-xs text-gray-500 mb-3">
-                    基于最新问诊、AI与人工复核生成的意见；可点击更新，或在下方继续提问。
-                  </div>
-                  <div className="flex-1 overflow-y-auto border border-gray-200 rounded p-2 bg-gray-50">
+
+                  <div
+                    ref={sideChatScrollRef}
+                    onScroll={handleSideChatScroll}
+                    className="relative flex-1 overflow-y-auto overscroll-contain border border-gray-200 rounded p-2 bg-gray-50"
+                  >
                     {sideChatMessages.length === 0 && (
                       <div className="text-gray-400 text-sm">暂无对话</div>
                     )}
@@ -1633,22 +1725,47 @@ function App() {
                         </span>
                       </div>
                     ))}
-                    <div ref={sideChatEndRef} />
+                    {!autoScrollChat && (
+                      <button
+                        onClick={() => {
+                          const el = sideChatScrollRef.current;
+                          if (!el) return;
+                          el.scrollTop = el.scrollHeight;
+                          setAutoScrollChat(true);
+                        }}
+                        className="absolute bottom-2 right-2 px-2 py-1 text-xs rounded bg-blue-600 text-white shadow hover:bg-blue-700"
+                        title="回到底部"
+                      >
+                        回到底部
+                      </button>
+                    )}
                   </div>
+
                   <div className="mt-3 flex gap-2">
                     <input
                       className="flex-1 border border-gray-300 rounded px-3 py-2 text-sm"
                       placeholder="在此输入问题…"
                       value={sideChatInput}
                       onChange={(e) => setSideChatInput(e.target.value)}
-                      onKeyDown={(e) => { if (e.key === 'Enter') sendSideChat(); }}
+                      onKeyDown={(e) => { if (e.key === 'Enter' && !llmLoading) sendSideChatStreaming(); }}
+                      disabled={llmLoading}
                     />
-                    <button
-                      className="px-3 py-2 rounded bg-blue-600 text-white text-sm hover:bg-blue-700"
-                      onClick={sendSideChat}
-                    >
-                      发送
-                    </button>
+                    {!llmLoading ? (
+                      <button
+                        className="px-3 py-2 rounded bg-blue-600 text-white text-sm hover:bg-blue-700"
+                        onClick={() => sendSideChatStreaming()}
+                        disabled={!sideChatInput.trim()}
+                      >
+                        发送
+                      </button>
+                    ) : (
+                      <button
+                        className="px-3 py-2 rounded bg-red-600 text-white text-sm hover:bg-red-700"
+                        onClick={() => llmAbortCtrl?.abort()}
+                      >
+                        停止
+                      </button>
+                    )}
                   </div>
                 </div>
               </div>
@@ -1808,8 +1925,6 @@ function App() {
                 </div>
               </div>
             </div>
-
-            {/* (Old external submit/discard section removed; buttons now inside unified correction section) */}
           </div>
         )}
       </main>
@@ -1818,7 +1933,7 @@ function App() {
       <footer className="mt-8 text-center text-gray-600 text-xs">
         *人工智能系统存在一定局限性，可能产生误差，相关检测结果仅供参考，不构成最终决策依据。
         <br />
-        (*AI system has certain limitations, may produce errors, and related detection results are for reference only, not as final decision basis.)
+        (*AI system has certain limitations and may produce errors. Related detection results are for reference only, not as final decision basis.)
       </footer>
 
       <ReselectImageModal

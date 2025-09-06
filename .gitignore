@@ -4,6 +4,7 @@
 *.log
 .vscode/
 .idea/
+.env
 
 # Python
 __pycache__/

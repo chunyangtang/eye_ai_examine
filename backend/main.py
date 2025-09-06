@@ -2,18 +2,24 @@
 
 import os
 import json
+import asyncio
 import datetime
-from typing import List, Dict, Any, Optional
+from dotenv import load_dotenv
+import httpx
+import threading
+from typing import List, Dict, Any, Optional, Union
 from pydantic import BaseModel
+from pathlib import Path
+
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-
-from typing import List, Dict, Any
-import threading # Import threading for Lock
+from fastapi.responses import StreamingResponse
 
 from datatype import ImageInfo, EyeDiagnosis, PatientData, SubmitDiagnosisRequest, EyePrediction, EyePredictionThresholds, ManualDiagnosisData, UpdateSelectionRequest
 from patientdataio import load_batch_patient_data, create_batch_dummy_patient_data
+
+load_dotenv()
 
 app = FastAPI()
 
@@ -31,8 +37,19 @@ patients_data_cache: Dict[str, PatientData] = {}
 manual_diagnosis_storage: Dict[str, ManualDiagnosisData] = {}
 # Cache of raw per-image probabilities to avoid disk I/O on reselection
 raw_probs_cache: Dict[str, Dict[str, Any]] = {}
+
 RAW_JSON_PATH = "../data/inference_results.json"
-patient_data_lock = threading.Lock() # Lock for thread-safe access to cached data
+INFERENCE_RESULTS_PATH = RAW_JSON_PATH
+# Path to questionnaire data from the other project
+CONSULTATION_DATA_PATH = os.path.normpath(
+    os.path.join(os.path.dirname(__file__), "../../eye_ai_consultation/data/questionnaire_data.json")
+)
+
+# Lock for thread-safe access to cached data
+patient_data_lock = threading.Lock()
+_infer_lock = threading.Lock()
+consultation_data_lock = threading.Lock()
+
 
 # No preloading - data will be loaded on-demand
 
@@ -410,14 +427,17 @@ async def add_new_patient_data(patient_data: PatientData):
         return {"status": f"Patient {patient_data.patient_id} added successfully to cache."}
 
 
-# --- Consultation Data Models ---
+# --- Consultation Data Models (accept free text and arrays) ---
 class EyeSymptomData(BaseModel):
     mainSymptom: Optional[str] = None
     onsetMethod: Optional[str] = None
     onsetTime: Optional[str] = None
-    accompanyingSymptoms: Optional[List[str]] = None
+    accompanyingSymptoms: Optional[Union[List[str], str]] = None  # allow string or list
     medicalHistory: Optional[str] = None
     mainSymptomOther: Optional[str] = None
+
+    class Config:
+        extra = 'allow'  # tolerate extra keys from UI
 
 class ConsultationData(BaseModel):
     name: Optional[str] = None
@@ -429,145 +449,680 @@ class ConsultationData(BaseModel):
     rightEye: Optional[EyeSymptomData] = None
     bothEyes: Optional[EyeSymptomData] = None
     submissionTime: Optional[str] = None
-    
+
     class Config:
-        arbitrary_types_allowed = True
+        extra = 'allow'  # tolerate extra keys
 
 class SaveConsultationRequest(BaseModel):
     patient_id: str
     consultation_data: ConsultationData
 
-# Path to consultation data
-CONSULTATION_DATA_PATH = "../../eye_ai_consultation/data/questionnaire_data.json"
-consultation_data_lock = threading.Lock()
 
-# --- Helper Functions ---
-def load_consultation_data():
-    """Load consultation data from JSON file"""
-    try:
-        if not os.path.exists(CONSULTATION_DATA_PATH):
-            print(f"Consultation data file not found: {CONSULTATION_DATA_PATH}")
-            return []
-            
-        with open(CONSULTATION_DATA_PATH, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except Exception as e:
-        print(f"Error loading consultation data: {e}")
+
+# --- Helpers for consultation file I/O ---
+def load_consultation_data() -> List[Dict[str, Any]]:
+    if not os.path.exists(CONSULTATION_DATA_PATH):
         return []
-
-def save_consultation_data(data):
-    """Save consultation data back to JSON file"""
-    try:
-        os.makedirs(os.path.dirname(CONSULTATION_DATA_PATH), exist_ok=True)
-        with open(CONSULTATION_DATA_PATH, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=4)
-        return True
-    except Exception as e:
-        print(f"Error saving consultation data: {e}")
-        return False
-
-def find_best_matching_consultation(all_data, patient_name, exam_time):
-    """Find best matching consultation entry by name and timestamp"""
-    if not patient_name or not exam_time or not all_data:
-        return None
-        
-    # Convert exam_time to datetime for comparison
-    try:
-        exam_datetime = datetime.datetime.fromisoformat(exam_time.replace('Z', '+00:00'))
-    except (ValueError, TypeError):
-        print(f"Invalid exam time format: {exam_time}")
-        exam_datetime = None
-    
-    # If we can't parse the exam time, just match by name
-    if not exam_datetime:
-        matching_entries = [entry for entry in all_data if entry.get("name") == patient_name]
-        return matching_entries[-1] if matching_entries else None
-    
-    # Find entries with matching name and submission time after exam time
-    matching_entries = []
-    for entry in all_data:
-        if entry.get("name") != patient_name:
-            continue
-            
+    with open(CONSULTATION_DATA_PATH, 'r', encoding='utf-8') as f:
         try:
-            submission_time = entry.get("submissionTime")
-            if not submission_time:
-                continue
-                
-            submission_datetime = datetime.datetime.fromisoformat(submission_time.replace('Z', '+00:00'))
-            
-            # Consider entries after the exam time
-            if submission_datetime >= exam_datetime:
-                matching_entries.append((entry, submission_datetime))
-        except (ValueError, TypeError):
-            continue
-    
-    # Sort by closeness to exam time
-    if matching_entries:
-        matching_entries.sort(key=lambda x: x[1])
-        return matching_entries[0][0]  # Return the closest matching entry
-    
-    # If no matches after exam time, return any match by name (most recent)
-    matching_by_name = [entry for entry in all_data if entry.get("name") == patient_name]
-    return matching_by_name[-1] if matching_by_name else None
+            data = json.load(f)
+            if isinstance(data, list):
+                return data
+            # If file accidentally not a list, coerce to list
+            return [data]
+        except json.JSONDecodeError:
+            return []
 
-# --- Consultation Endpoints ---
+def save_consultation_data(data: List[Dict[str, Any]]) -> None:
+    os.makedirs(os.path.dirname(CONSULTATION_DATA_PATH), exist_ok=True)
+    with open(CONSULTATION_DATA_PATH, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=4)
+
+def _to_text(v: Any) -> Optional[str]:
+    if v is None:
+        return None
+    if isinstance(v, list):
+        return "、".join([str(x) for x in v])
+    return str(v)
+
+def normalize_consultation_text(entry: Dict[str, Any]) -> Dict[str, Any]:
+    # Ensure eye sections store free text where needed
+    for eye_field in ("leftEye", "rightEye", "bothEyes"):
+        eye = entry.get(eye_field)
+        if isinstance(eye, dict):
+            if "accompanyingSymptoms" in eye:
+                eye["accompanyingSymptoms"] = _to_text(eye.get("accompanyingSymptoms"))
+    return entry
+
+def _parse_iso_to_aware_dt(s: Optional[str]) -> Optional[datetime.datetime]:
+    """
+    Parse ISO string into a timezone-aware datetime.
+    - Accepts 'Z' suffix or explicit offsets.
+    - If naive (no tz), assume local timezone.
+    """
+    if not s:
+        return None
+    try:
+        dt = datetime.datetime.fromisoformat(str(s).replace('Z', '+00:00'))
+    except Exception:
+        return None
+    if dt.tzinfo is None:
+        try:
+            local_tz = datetime.datetime.now().astimezone().tzinfo
+        except Exception:
+            local_tz = datetime.timezone.utc
+        dt = dt.replace(tzinfo=local_tz)
+    return dt
+
+# --- Correct matching: submissionTime should be BEFORE or equal to examineTime, choose closest ---
+def find_best_matching_consultation(all_data: List[Dict[str, Any]], patient_name: Optional[str], exam_time: Optional[str]):
+    if not patient_name:
+        return None
+
+    # Parse exam_time -> aware (UTC for comparison)
+    exam_dt = _parse_iso_to_aware_dt(exam_time)
+    exam_dt_utc = exam_dt.astimezone(datetime.timezone.utc) if exam_dt else None
+
+    # Filter by name
+    same_name = [x for x in all_data if x.get("name") == patient_name]
+    if not same_name:
+        return None
+
+    if not exam_dt_utc:
+        # If no exam time, return the last record by submissionTime if present
+        def time_key(x):
+            st_dt = _parse_iso_to_aware_dt(x.get("submissionTime"))
+            return (st_dt.astimezone(datetime.timezone.utc) if st_dt else datetime.datetime.min.replace(tzinfo=datetime.timezone.utc))
+        return sorted(same_name, key=time_key)[-1]
+
+    # Choose the entry with submissionTime <= exam_time and closest to exam_time
+    candidates = []
+    for x in same_name:
+        st_dt = _parse_iso_to_aware_dt(x.get("submissionTime"))
+        if not st_dt:
+            continue
+        st_dt_utc = st_dt.astimezone(datetime.timezone.utc)
+        if st_dt_utc <= exam_dt_utc:
+            candidates.append((x, st_dt_utc))
+    if candidates:
+        candidates.sort(key=lambda t: (exam_dt_utc - t[1]))
+        return candidates[0][0]
+
+    # Fallback: if none before exam, return the earliest after exam (closest)
+    after = []
+    for x in same_name:
+        st_dt = _parse_iso_to_aware_dt(x.get("submissionTime"))
+        if not st_dt:
+            continue
+        st_dt_utc = st_dt.astimezone(datetime.timezone.utc)
+        if st_dt_utc > exam_dt_utc:
+            after.append((x, st_dt_utc))
+    if after:
+        after.sort(key=lambda t: (t[1] - exam_dt_utc))
+        return after[0][0]
+
+    return None
+
+# --- Helpers for patient context ---
+def _get_patient_context(patient_id: str) -> Dict[str, Optional[str]]:
+    """
+    Returns {'name': str|None, 'examineTime': str|None} from cache, else from RAW_JSON_PATH.
+    """
+    ctx = {"name": None, "examineTime": None}
+    try:
+        patient = patients_data_cache.get(patient_id)
+        if patient:
+            ctx["name"] = getattr(patient, "name", None)
+            ctx["examineTime"] = getattr(patient, "examine_time", None)
+            if ctx["name"] or ctx["examineTime"]:
+                return ctx
+    except Exception:
+        pass
+
+    # Fallback to read raw inference file
+    try:
+        with open(RAW_JSON_PATH, "r", encoding="utf-8") as f:
+            all_json = json.load(f)
+        raw = all_json.get(patient_id, {})
+        if isinstance(raw, dict):
+            ctx["name"] = raw.get("name")
+            ctx["examineTime"] = raw.get("examineTime")
+    except Exception:
+        pass
+    return ctx
+
+def _find_best_matching_index(all_data: List[Dict[str, Any]], patient_name: Optional[str], exam_time: Optional[str]) -> Optional[int]:
+    """
+    Same selection rule as find_best_matching_consultation, but returns index in list.
+    Prefers submissionTime <= examineTime (closest), else earliest after.
+    """
+    if not patient_name or not isinstance(all_data, list) or len(all_data) == 0:
+        return None
+
+    exam_dt = _parse_iso_to_aware_dt(exam_time)
+    exam_utc = exam_dt.astimezone(datetime.timezone.utc) if exam_dt else None
+
+    # filter name
+    name_idxs = [(i, x) for i, x in enumerate(all_data) if isinstance(x, dict) and x.get("name") == patient_name]
+    if not name_idxs:
+        return None
+
+    if not exam_utc:
+        # no exam time -> pick latest by submissionTime
+        def time_key(x):
+            st = _parse_iso_to_aware_dt(x.get("submissionTime"))
+            return (st.astimezone(datetime.timezone.utc) if st else datetime.datetime.min.replace(tzinfo=datetime.timezone.utc))
+        name_idxs.sort(key=lambda t: time_key(t[1]))
+        return name_idxs[-1][0]
+
+    # before or equal to exam (closest)
+    candidates = []
+    for i, x in name_idxs:
+        st = _parse_iso_to_aware_dt(x.get("submissionTime"))
+        if not st:
+            continue
+        st_utc = st.astimezone(datetime.timezone.utc)
+        if st_utc <= exam_utc:
+            candidates.append((i, st_utc))
+    if candidates:
+        candidates.sort(key=lambda t: (exam_utc - t[1]))
+        return candidates[0][0]
+
+    # earliest after exam
+    after = []
+    for i, x in name_idxs:
+        st = _parse_iso_to_aware_dt(x.get("submissionTime"))
+        if not st:
+            continue
+        st_utc = st.astimezone(datetime.timezone.utc)
+        if st_utc > exam_utc:
+            after.append((i, st_utc))
+    if after:
+        after.sort(key=lambda t: (t[1] - exam_utc))
+        return after[0][0]
+    return None
+
+# --- API: get/save consultation ---
 @app.get("/api/consultation/{patient_id}")
 async def get_consultation_info(patient_id: str):
-    """Get consultation information for a patient"""
-    with patient_data_lock:
-        # First check if patient exists
-        patient = patients_data_cache.get(patient_id)
-        if not patient:
-            raise HTTPException(status_code=404, detail=f"Patient {patient_id} not found")
-            
-        patient_name = patient.name if hasattr(patient, "name") else None
-        exam_time = patient.examine_time if hasattr(patient, "examine_time") else None
-        
-        if not patient_name:
-            raise HTTPException(status_code=404, detail="Patient has no name information")
-    
+    # Obtain patient context
+    ctx = _get_patient_context(patient_id)
+    patient_name = ctx.get("name")
+    examine_time = ctx.get("examineTime")
+
     with consultation_data_lock:
-        # Load consultation data
         all_consultations = load_consultation_data()
-        if not all_consultations:
-            return {"consultation_data": None, "status": "No consultation data available"}
-        
-        # Find best matching consultation
-        best_match = find_best_matching_consultation(all_consultations, patient_name, exam_time)
-        
-        if best_match:
-            return {"consultation_data": best_match, "status": "success"}
+        idx = _find_best_matching_index(all_consultations, patient_name, examine_time)
+        if idx is None:
+            return {
+                "consultation_data": None,
+                "status": "no_match",
+                "source": "questionnaire_data.json",
+                "path": CONSULTATION_DATA_PATH,
+            }
+
+        base = all_consultations[idx]
+        refined = base.get("refined")
+        # Prefer refined; if present, surface refinedTime as submissionTime for display
+        if isinstance(refined, dict):
+            result = dict(refined)
+            result.setdefault("name", base.get("name"))
+            # Show refinedTime as submissionTime for UI consistency
+            if "refinedTime" in result:
+                result.setdefault("submissionTime", result.get("refinedTime"))
+            else:
+                # fallback to base submissionTime
+                result.setdefault("submissionTime", base.get("submissionTime"))
+            return {
+                "consultation_data": result,
+                "status": "success_refined",
+                "source": f"questionnaire_data.json[{idx}].refined",
+                "path": CONSULTATION_DATA_PATH
+            }
         else:
-            return {"consultation_data": None, "status": "No matching consultation found"}
+            # Return original item minimally (only fields the UI uses)
+            minimal = {
+                "name": base.get("name"),
+                "age": base.get("age"),
+                "gender": base.get("gender"),
+                "phone": base.get("phone"),
+                "affectedArea": base.get("affectedArea"),
+                "leftEye": base.get("leftEye"),
+                "rightEye": base.get("rightEye"),
+                "bothEyes": base.get("bothEyes"),
+                "submissionTime": base.get("submissionTime"),
+            }
+            return {
+                "consultation_data": minimal,
+                "status": "success_original",
+                "source": f"questionnaire_data.json[{idx}]",
+                "path": CONSULTATION_DATA_PATH
+            }
 
 @app.post("/api/consultation")
 async def save_consultation_info(request: SaveConsultationRequest):
-    """Save consultation information for a patient"""
-    with patient_data_lock:
-        # First check if patient exists
-        patient = patients_data_cache.get(request.patient_id)
-        if not patient:
-            raise HTTPException(status_code=404, detail=f"Patient {request.patient_id} not found")
-    
+    # Normalize and save as "refined" inside original questionnaire item
     with consultation_data_lock:
-        # Load existing consultation data
         all_consultations = load_consultation_data()
-        
-        # Create new consultation entry
-        new_entry = request.consultation_data.dict()
-        
-        # Add current timestamp
-        new_entry["submissionTime"] = datetime.datetime.now().isoformat()
-        
-        # Append to the list
-        all_consultations.append(new_entry)
-        
-        # Save back to file
-        if save_consultation_data(all_consultations):
-            return {"status": "Consultation data saved successfully"}
+
+        # Build normalized refined payload
+        refined_payload = request.consultation_data.dict(exclude_none=True)
+        refined_payload = normalize_consultation_text(refined_payload)
+
+        # Ensure name if missing
+        if not refined_payload.get("name"):
+            ctx = _get_patient_context(request.patient_id)
+            if ctx.get("name"):
+                refined_payload["name"] = ctx["name"]
+
+        # Timestamp for refined save (tz-aware)
+        refined_time = datetime.datetime.now().astimezone().isoformat()
+        refined_payload["refinedTime"] = refined_time
+        refined_payload["_exam_patient_id"] = request.patient_id
+
+        # Locate original questionnaire item by name + examineTime alignment
+        ctx = _get_patient_context(request.patient_id)
+        idx = _find_best_matching_index(all_consultations, ctx.get("name"), ctx.get("examineTime"))
+
+        if idx is not None:
+            # Overwrite previous refined content
+            all_consultations[idx]["refined"] = refined_payload
         else:
-            raise HTTPException(status_code=500, detail="Failed to save consultation data")
+            # Fallback: create a minimal container with refined inside
+            container = {
+                "name": refined_payload.get("name"),
+                "submissionTime": refined_time,
+                "refined": refined_payload,
+            }
+            all_consultations.append(container)
+
+        save_consultation_data(all_consultations)
+
+    return {
+        "status": "Consultation data refined and saved successfully",
+        "refined": refined_payload,
+        "path": CONSULTATION_DATA_PATH
+    }
+
+
+# --- LLM prompts config (provider/base/model stay in .env) ---
+LLM_PROMPTS_PATH = os.getenv(
+    "LLM_PROMPTS_PATH",
+    os.path.join(os.path.dirname(__file__), "config", "llm_prompts.json")
+)
+
+def load_llm_prompts() -> Dict[str, Any]:
+    defaults = {
+        "system_prompt": "",
+        "update_prompt": "请基于最新问诊信息、AI预测与人工复检结果，生成简要且可操作的临床意见摘要。",
+        "include_patient_context": True,
+        "context_template": "患者：{patient_name}（{age}岁，{gender_zh}），检查时间：{examine_time}\n问诊要点：{consultation_summary}\nAI预测（左眼）：{ai_left_summary}\nAI预测（右眼）：{ai_right_summary}\n人工复核：{manual_summary}\n阈值：{threshold_summary}"
+    }
+    try:
+        p = Path(LLM_PROMPTS_PATH)
+        if p.exists():
+            with p.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return {**defaults, **data}
+    except Exception:
+        pass
+    return defaults
+
+@app.get("/api/llm_config")
+async def get_llm_config():
+    cfg = load_llm_prompts()
+    # Only prompts/flags; provider/base/model remain in .env
+    return {
+        "system_prompt": cfg.get("system_prompt", ""),
+        "update_prompt": cfg.get("update_prompt", ""),
+        "include_patient_context": cfg.get("include_patient_context", True),
+        "has_context_template": bool(cfg.get("context_template"))
+    }
+
+def _zh_gender(g: Optional[str]) -> Optional[str]:
+    if not g:
+        return None
+    s = str(g).strip().lower()
+    if s == "male": return "男"
+    if s == "female": return "女"
+    if s == "other": return "其他"
+    return g
+
+def _format_prob(p: Optional[float]) -> str:
+    try:
+        return f"{float(p):.2f}"
+    except Exception:
+        return "-"
+
+def _summarize_consultation(cons: Optional[Dict[str, Any]]) -> str:
+    if not cons or not isinstance(cons, dict):
+        return "无"
+    map_area = lambda a: "左眼" if a=="left" else ("右眼" if a=="right" else "双眼")
+    areas = [map_area(a) for a in (cons.get("affectedArea") or [])]
+    parts = []
+    if areas: parts.append(f"受累部位：{'、'.join(areas)}")
+    def eye_part(label, obj):
+        if not obj: return None
+        ms = obj.get("mainSymptom")
+        om = obj.get("onsetMethod")
+        ot = obj.get("onsetTime")
+        ac = obj.get("accompanyingSymptoms")
+        mh = obj.get("medicalHistory")
+        segs = []
+        if ms: segs.append(f"主要：{ms}")
+        if om or ot: segs.append(f"起病：{(om or '')} {(' '+ot) if ot else ''}".strip())
+        if ac: segs.append(f"伴随：{ac}")
+        if mh: segs.append(f"病史：{mh}")
+        return f"{label}（" + "；".join(segs) + "）" if segs else None
+    for label, key in (("左眼","leftEye"),("右眼","rightEye"),("双眼","bothEyes")):
+        x = eye_part(label, cons.get(key))
+        if x: parts.append(x)
+    return "；".join(parts) if parts else "无"
+
+def _summarize_ai(patient: Optional[PatientData], eye_key: str) -> str:
+    if not patient or not getattr(patient, "prediction_results", None):
+        return "无"
+    preds = getattr(patient.prediction_results, eye_key, None) if hasattr(patient.prediction_results, eye_key) else patient.prediction_results.get(eye_key)  # type: ignore
+    if hasattr(preds, "dict"):
+        preds = preds.dict()  # type: ignore
+    if not isinstance(preds, dict):
+        return "无"
+    # Try to read thresholds
+    th = getattr(patient, "prediction_thresholds", None)
+    thd = th.dict() if hasattr(th, "dict") else (th or {})
+    # Rank top-3
+    items = []
+    for k, v in preds.items():
+        try:
+            items.append((k, float(v), float(thd.get(k, 0.5))))
+        except Exception:
+            continue
+    items.sort(key=lambda t: t[1], reverse=True)
+    top = items[:3]
+    if not top:
+        return "无"
+    parts = [f"{k} P={_format_prob(p)} (T={_format_prob(t)})" for k, p, t in top]
+    return "，".join(parts)
+
+def _summarize_thresholds(patient: Optional[PatientData]) -> str:
+    if not patient or not getattr(patient, "prediction_thresholds", None):
+        return "默认"
+    th = patient.prediction_thresholds
+    thd = th.dict() if hasattr(th, "dict") else th
+    if not isinstance(thd, dict): return "默认"
+    parts = []
+    for k in ("AMD","青光眼","糖网","白内障"):
+        if k in thd:
+            parts.append(f"{k}:{_format_prob(thd[k])}")
+    return "；".join(parts) if parts else "默认"
+
+def _summarize_manual(patient_id: str) -> str:
+    md = manual_diagnosis_storage.get(patient_id)
+    if not md:
+        return "无"
+    try:
+        md_dict = md.dict()
+    except Exception:
+        md_dict = {
+            "manual_diagnosis": getattr(md, "manual_diagnosis", {}),
+            "custom_diseases": getattr(md, "custom_diseases", {}),
+            "diagnosis_notes": getattr(md, "diagnosis_notes", "")
+        }
+    pos = [k for k, v in (md_dict.get("manual_diagnosis") or {}).items() if v]
+    extra = md_dict.get("custom_diseases") or {}
+    notes = (md_dict.get("diagnosis_notes") or "").strip()
+    segs = []
+    if pos: segs.append("人工判断：" + "、".join(pos))
+    if getattr(extra, "left_eye", None) or getattr(extra, "right_eye", None):
+        # pydantic object support
+        l = getattr(extra, "left_eye", "")
+        r = getattr(extra, "right_eye", "")
+        if str(l).strip(): segs.append(f"左眼附加：{l}")
+        if str(r).strip(): segs.append(f"右眼附加：{r}")
+    elif isinstance(extra, dict):
+        if extra.get("left_eye"): segs.append(f"左眼附加：{extra.get('left_eye')}")
+        if extra.get("right_eye"): segs.append(f"右眼附加：{extra.get('right_eye')}")
+    if notes: segs.append(f"备注：{notes}")
+    return "；".join(segs) if segs else "无"
+
+def _build_context_placeholders(patient_id: Optional[str]) -> Dict[str, str]:
+    p: Optional[PatientData] = patients_data_cache.get(patient_id or "")
+    name = getattr(p, "name", None) if p else None
+    age = getattr(p, "age", None) if p and hasattr(p, "age") else None
+    gender = getattr(p, "gender", None) if p and hasattr(p, "gender") else None
+    gender_zh = _zh_gender(gender)
+    examine_time = getattr(p, "examine_time", None) if p else None
+
+    # Load refined/original consultation for summary
+    with consultation_data_lock:
+        cons_all = load_consultation_data()
+        # reuse existing selector
+        ctx = _get_patient_context(patient_id or "")
+        idx = _find_best_matching_index(cons_all, ctx.get("name"), ctx.get("examineTime"))
+        cons = cons_all[idx].get("refined") if (idx is not None and isinstance(cons_all[idx].get("refined"), dict)) else (cons_all[idx] if idx is not None else None)
+
+    consultation_summary = _summarize_consultation(cons or {})
+    ai_left_summary = _summarize_ai(p, "left_eye")
+    ai_right_summary = _summarize_ai(p, "right_eye")
+    threshold_summary = _summarize_thresholds(p)
+    manual_summary = _summarize_manual(patient_id or "")
+
+    return {
+        "patient_name": name or "患者",
+        "age": str(age or ""),
+        "gender_zh": gender_zh or "",
+        "examine_time": examine_time or "",
+        "consultation_summary": consultation_summary,
+        "ai_left_summary": ai_left_summary,
+        "ai_right_summary": ai_right_summary,
+        "manual_summary": manual_summary,
+        "threshold_summary": threshold_summary,
+    }
+
+def _fill_template(template: str, mapping: Dict[str, str]) -> str:
+    # Simple placeholder replace without raising on missing keys
+    out = template
+    for k, v in mapping.items():
+        out = out.replace("{" + k + "}", v or "")
+    return out
+
+
+def load_inference_map() -> Dict[str, Any]:
+    if not os.path.exists(INFERENCE_RESULTS_PATH):
+        return {}
+    try:
+        with open(INFERENCE_RESULTS_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+def save_inference_map(d: Dict[str, Any]) -> None:
+    os.makedirs(os.path.dirname(INFERENCE_RESULTS_PATH), exist_ok=True)
+    with open(INFERENCE_RESULTS_PATH, "w", encoding="utf-8") as f:
+        json.dump(d, f, ensure_ascii=False, indent=2)
+
+def persist_llm_context(
+    patient_id: str,
+    *,
+    system_prompt: str,
+    context_text: str,
+    user_prompt: str,
+    assistant_text: str,
+    reset: bool,
+) -> Dict[str, Any]:
+    with _infer_lock:
+        d = load_inference_map()
+        rec = d.get(patient_id)
+        if not isinstance(rec, dict):
+            rec = {}
+        # fresh context when reset; else append to existing
+        base_ctx = {} if reset or not isinstance(rec.get("llm_context"), dict) else rec["llm_context"]
+        history: List[Dict[str, str]] = []
+
+        if reset:
+            # put current system/context at top
+            if system_prompt:
+                history.append({"role": "system", "content": system_prompt})
+            if context_text.strip():
+                history.append({"role": "system", "content": f"[患者上下文]\n{context_text}"})
+        else:
+            old_hist = base_ctx.get("history")
+            if isinstance(old_hist, list):
+                history.extend([x for x in old_hist if isinstance(x, dict) and "role" in x and "content" in x])
+
+        # append the new turn
+        history.append({"role": "user", "content": user_prompt})
+        history.append({"role": "assistant", "content": assistant_text})
+
+        rec["llm_context"] = {
+            "history": history,
+            "last_updated": datetime.datetime.now().astimezone().isoformat(),
+            "system_prompt": system_prompt,
+            "context_text": context_text,
+            "version": 1,
+        }
+        d[patient_id] = rec
+        save_inference_map(d)
+        return rec["llm_context"]
+
+@app.get("/api/llm_context/{patient_id}")
+async def get_llm_context(patient_id: str):
+    with _infer_lock:
+        d = load_inference_map()
+        rec = d.get(patient_id) or {}
+        ctx = rec.get("llm_context") or {}
+        if not isinstance(ctx, dict):
+            ctx = {}
+        return {"status": "ok", "patient_id": patient_id, "llm_context": ctx, "path": INFERENCE_RESULTS_PATH}
+
+@app.delete("/api/llm_context/{patient_id}")
+async def delete_llm_context(patient_id: str):
+    with _infer_lock:
+        d = load_inference_map()
+        rec = d.get(patient_id)
+        if isinstance(rec, dict) and "llm_context" in rec:
+            rec.pop("llm_context", None)
+            d[patient_id] = rec
+            save_inference_map(d)
+    return {"status": "deleted", "patient_id": patient_id}
+
+# --- LLM chat (streaming) ---
+class LLMChatRequest(BaseModel):
+    patient_id: Optional[str] = None
+    messages: List[Dict[str, str]]  # [{role:'user'|'assistant'|'system', content:str}]
+    persist: Optional[bool] = True     # persist to inference_results.json
+    reset: Optional[bool] = False      # overwrite previous on this request
+
+
+def _llm_env():
+    # Provider/base/model come from .env; no config file here
+    return {
+        "base": os.getenv("LLM_API_BASE", "https://api.openai.com/v1"),
+        "key": os.getenv("LLM_API_KEY", "YOUR_API_KEY_HERE"),
+        "model": os.getenv("LLM_MODEL", "gpt-4o-mini"),
+        "provider": os.getenv("LLM_PROVIDER", "openai"),
+    }
+
+@app.post("/api/llm_chat_stream")
+async def llm_chat_stream(req: LLMChatRequest):
+    env = _llm_env()
+    cfg = load_llm_prompts()
+    use_real = (env["key"] and env["key"] != "YOUR_API_KEY_HERE")
+
+    # Build messages_to_send (system + optional patient context + history)
+    messages_to_send: List[Dict[str, str]] = []
+    sys_prompt = cfg.get("system_prompt", "") or ""
+    if sys_prompt:
+        messages_to_send.append({"role": "system", "content": sys_prompt})
+
+    context_text = ""
+    if cfg.get("include_patient_context", True):
+        placeholders = _build_context_placeholders(req.patient_id)
+        context_text = _fill_template(cfg.get("context_template", ""), placeholders)
+        if context_text.strip():
+            messages_to_send.append({"role": "system", "content": f"[患者上下文]\n{context_text}"})
+
+    # Append incoming chat history (user prompt should be the last)
+    messages_to_send.extend(req.messages or [])
+
+    # Capture last user prompt for persistence
+    last_user = ""
+    for m in reversed(req.messages or []):
+        if m.get("role") == "user":
+            last_user = m.get("content", "")
+            break
+
+    # Buffer streamed assistant content for persistence after stream ends
+    assistant_buf: List[str] = []
+
+    async def simulate_stream():
+        preface = "思考中…\n"
+        for ch in preface:
+            yield ch
+            await asyncio.sleep(0.02)
+        reply = f"（演示）已收到：{last_user}。这是一个流式输出示例。"
+        for token in reply.split():
+            assistant_buf.append(token + " ")
+            yield token + " "
+            await asyncio.sleep(0.04)
+        if req.persist and req.patient_id:
+            persist_llm_context(
+                req.patient_id,
+                system_prompt=sys_prompt,
+                context_text=context_text,
+                user_prompt=last_user,
+                assistant_text="".join(assistant_buf),
+                reset=bool(req.reset),
+            )
+
+    async def openai_stream():
+        url = f"{env['base'].rstrip('/')}/chat/completions"
+        headers = { "Authorization": f"Bearer {env['key']}", "Content-Type": "application/json" }
+        payload = { "model": env["model"], "messages": messages_to_send, "temperature": 0.2, "stream": True }
+        timeout = httpx.Timeout(60.0, read=60.0)
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                async with client.stream("POST", url, headers=headers, json=payload) as r:
+                    async for raw_line in r.aiter_lines():
+                        if not raw_line: continue
+                        line = raw_line.strip()
+                        if line.startswith(":") or not line.startswith("data:"): continue
+                        data = line[len("data:"):].strip()
+                        if data in ("", "null"): continue
+                        if data == "[DONE]": break
+                        try:
+                            obj = json.loads(data)
+                        except Exception:
+                            continue
+                        if not isinstance(obj, dict): continue
+                        if "error" in obj:
+                            msg = (obj.get("error") or {}).get("message", "LLM provider error")
+                            yield f"\n[LLM error] {msg}\n"
+                            break
+                        choices = obj.get("choices") or []
+                        if not isinstance(choices, list) or len(choices) == 0: continue
+                        for ch in choices:
+                            delta = ch.get("delta") or {}
+                            content = (delta.get("content") or ch.get("text")) or ""
+                            if content:
+                                assistant_buf.append(content)
+                                yield content
+        finally:
+            if req.persist and req.patient_id and assistant_buf:
+                persist_llm_context(
+                    req.patient_id,
+                    system_prompt=sys_prompt,
+                    context_text=context_text,
+                    user_prompt=last_user,
+                    assistant_text="".join(assistant_buf),
+                    reset=bool(req.reset),
+                )
+
+    if not use_real:
+        return StreamingResponse(simulate_stream(), media_type="text/plain; charset=utf-8")
+    return StreamingResponse(openai_stream(), media_type="text/plain; charset=utf-8")
 
 
 # Run the FastAPI application
