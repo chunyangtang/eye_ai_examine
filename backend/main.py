@@ -19,6 +19,13 @@ from fastapi.responses import StreamingResponse
 from datatype import ImageInfo, EyeDiagnosis, PatientData, SubmitDiagnosisRequest, EyePrediction, EyePredictionThresholds, ManualDiagnosisData, UpdateSelectionRequest
 from patientdataio import load_batch_patient_data, create_batch_dummy_patient_data
 
+import logging
+
+# 在文件开头添加日志配置
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+
 load_dotenv()
 
 app = FastAPI()
@@ -787,6 +794,9 @@ def _zh_gender(g: Optional[str]) -> Optional[str]:
     if s == "male": return "男"
     if s == "female": return "女"
     if s == "other": return "其他"
+    # 处理中文输入
+    if s in ["男", "女性", "女", "其他"]:
+        return s if s in ["男", "女", "其他"] else "女"
     return g
 
 def _format_prob(p: Optional[float]) -> str:
@@ -846,16 +856,31 @@ def _summarize_ai(patient: Optional[PatientData], eye_key: str) -> str:
     return "，".join(parts)
 
 def _summarize_thresholds(patient: Optional[PatientData]) -> str:
-    if not patient or not getattr(patient, "prediction_thresholds", None):
-        return "默认"
-    th = patient.prediction_thresholds
+    """总结阈值设置"""
+    if not patient:
+        return "使用默认阈值"
+    
+    th = getattr(patient, "prediction_thresholds", None)
+    if not th:
+        return "AMD:0.30；青光眼:0.60；糖网:0.50；白内障:0.60"
+    
     thd = th.dict() if hasattr(th, "dict") else th
-    if not isinstance(thd, dict): return "默认"
-    parts = []
-    for k in ("AMD","青光眼","糖网","白内障"):
-        if k in thd:
-            parts.append(f"{k}:{_format_prob(thd[k])}")
-    return "；".join(parts) if parts else "默认"
+    if not isinstance(thd, dict):
+        return "AMD:0.30；青光眼:0.60；糖网:0.50；白内障:0.60"
+    
+    items = []
+    disease_mapping = {
+        "年龄相关性黄斑变性": "AMD",
+        "青光眼": "青光眼", 
+        "糖尿病性视网膜病变": "糖网",
+        "白内障": "白内障"
+    }
+    
+    for disease, short_name in disease_mapping.items():
+        threshold = thd.get(disease, 0.5)
+        items.append(f"{short_name}:{threshold:.2f}")
+    
+    return "；".join(items)
 
 def _summarize_manual(patient_id: str) -> str:
     md = manual_diagnosis_storage.get(patient_id)
@@ -886,25 +911,245 @@ def _summarize_manual(patient_id: str) -> str:
     if notes: segs.append(f"备注：{notes}")
     return "；".join(segs) if segs else "无"
 
+def _summarize_ai_detailed(patient: Optional[PatientData], eye_key: str) -> str:
+    """改进的AI预测总结，直接显示疾病可能性判断结果"""
+    if not patient:
+        return "无预测数据"
+    
+    # 获取预测结果和阈值
+    prediction_results = getattr(patient, "prediction_results", None)
+    prediction_thresholds = getattr(patient, "prediction_thresholds", None)
+    diagnosis_results = getattr(patient, "diagnosis_results", None)
+    
+    if not prediction_results:
+        # 如果没有prediction_results，尝试从原始数据重新计算
+        logger.warning(f"No prediction_results for patient {patient.patient_id}, trying to use raw data")
+        return _fallback_ai_summary(patient, eye_key)
+    
+    # 获取该眼的预测概率
+    eye_probs = None
+    if hasattr(prediction_results, eye_key):
+        eye_probs = getattr(prediction_results, eye_key)
+    elif isinstance(prediction_results, dict):
+        eye_probs = prediction_results.get(eye_key)
+    
+    if hasattr(eye_probs, "dict"):
+        eye_probs = eye_probs.dict()
+    elif hasattr(eye_probs, "__dict__"):
+        eye_probs = eye_probs.__dict__
+    
+    if not isinstance(eye_probs, dict) or not eye_probs:
+        logger.warning(f"No eye_probs for {eye_key}, trying fallback")
+        return _fallback_ai_summary(patient, eye_key)
+    
+    # 获取阈值
+    thresholds = {}
+    if prediction_thresholds:
+        if hasattr(prediction_thresholds, "dict"):
+            thresholds = prediction_thresholds.dict()
+        elif hasattr(prediction_thresholds, "__dict__"):
+            thresholds = prediction_thresholds.__dict__
+        elif isinstance(prediction_thresholds, dict):
+            thresholds = prediction_thresholds
+    
+    # 默认阈值
+    default_thresholds = {
+        "年龄相关性黄斑变性": 0.30,
+        "青光眼": 0.60,
+        "糖尿病性视网膜病变": 0.50,
+        "白内障": 0.60,
+        "其他黄斑病变": 0.50,
+        "其他视网膜病": 0.50,
+        "视网膜静脉阻塞（RVO）": 0.50,
+        "视网膜动脉阻塞（RAO）": 0.50,
+        "病理性近视": 0.50,
+        "视网膜脱离（RD）": 0.50,
+        "正常": 0.50
+    }
+    
+    # 合并阈值，优先使用设定的阈值
+    final_thresholds = {**default_thresholds, **thresholds}
+    
+    # 获取诊断结果
+    eye_diagnosis = {}
+    if diagnosis_results:
+        if hasattr(diagnosis_results, eye_key):
+            diag_data = getattr(diagnosis_results, eye_key)
+            if hasattr(diag_data, "dict"):
+                eye_diagnosis = diag_data.dict()
+            elif hasattr(diag_data, "__dict__"):
+                eye_diagnosis = diag_data.__dict__
+            elif isinstance(diag_data, dict):
+                eye_diagnosis = diag_data
+        elif isinstance(diagnosis_results, dict):
+            diag_data = diagnosis_results.get(eye_key, {})
+            if hasattr(diag_data, "dict"):
+                eye_diagnosis = diag_data.dict()
+            elif isinstance(diag_data, dict):
+                eye_diagnosis = diag_data
+    
+    # 按预测值降序排序，只显示前几个主要疾病
+    try:
+        sorted_diseases = sorted(eye_probs.items(), key=lambda x: float(x[1]), reverse=True)
+    except Exception:
+        logger.error(f"Error sorting diseases for {eye_key}: {eye_probs}")
+        return "预测数据格式错误"
+    
+    items = []
+    for disease, prob in sorted_diseases[:5]:  # 只显示前5个疾病
+        try:
+            prob_val = float(prob)
+            threshold = float(final_thresholds.get(disease, 0.5))
+            is_positive = eye_diagnosis.get(disease, prob_val > threshold)
+            
+            # 根据是否超过阈值显示不同格式
+            if is_positive:
+                items.append(f"{disease}: **阳性** (预测值{prob_val:.3f} > 阈值{threshold:.3f})")
+            else:
+                items.append(f"{disease}: 阴性 (预测值{prob_val:.3f} ≤ 阈值{threshold:.3f})")
+        except Exception as e:
+            logger.warning(f"Error processing disease {disease}: {e}")
+            continue
+    
+    return "；".join(items) if items else "无有效预测"
+
+def _fallback_ai_summary(patient: Optional[PatientData], eye_key: str) -> str:
+    """当无法从patient对象获取预测结果时的fallback方法"""
+    if not patient:
+        return "无预测数据"
+    
+    patient_id = getattr(patient, "patient_id", None)
+    if not patient_id:
+        return "无患者ID"
+    
+    # 尝试从原始缓存数据中获取
+    try:
+        raw_cache = raw_probs_cache.get(patient_id)
+        if not raw_cache:
+            return "无原始预测缓存"
+        
+        # 根据eye_key确定查找的图像类型
+        cfp_type = "左眼CFP" if eye_key == "left_eye" else "右眼CFP"
+        
+        # 获取该类型的最新图像数据
+        raw_by_type = raw_cache.get("by_type", {})
+        images_of_type = raw_by_type.get(cfp_type, [])
+        
+        if not images_of_type:
+            return f"无{cfp_type}数据"
+        
+        # 使用最新的图像预测结果
+        latest_image = images_of_type[0]  # 已经按时间排序
+        probs = latest_image.get("probs", {})
+        
+        if not probs:
+            return "无概率数据"
+        
+        # 疾病名称映射
+        diagnosis_mapping = {
+            "青光眼": "青光眼",
+            "糖尿病性视网膜病变": "糖网",
+            "年龄相关性黄斑变性": "AMD", 
+            "病理性近视": "病理性近视",
+            "视网膜静脉阻塞（RVO）": "RVO",
+            "视网膜动脉阻塞（RAO）": "RAO",
+            "视网膜脱离（RD）": "视网膜脱离",
+            "其他视网膜病": "其它视网膜病",
+            "其他黄斑病变": "其它黄斑病变",
+            "白内障": "白内障",
+            "正常": "正常"
+        }
+        
+        # 转换疾病名称并排序
+        mapped_probs = {}
+        for orig_name, prob in probs.items():
+            mapped_name = diagnosis_mapping.get(orig_name, orig_name)
+            mapped_probs[mapped_name] = float(prob)
+        
+        sorted_diseases = sorted(mapped_probs.items(), key=lambda x: x[1], reverse=True)
+        
+        # 使用默认阈值
+        default_thresholds = {
+            "AMD": 0.30,
+            "青光眼": 0.60,
+            "糖网": 0.50,
+            "白内障": 0.60,
+        }
+        
+        items = []
+        for disease, prob in sorted_diseases[:5]:
+            threshold = default_thresholds.get(disease, 0.5)
+            is_positive = prob > threshold
+            
+            if is_positive:
+                items.append(f"{disease}: **阳性** (预测值{prob:.3f} > 阈值{threshold:.3f})")
+            else:
+                items.append(f"{disease}: 阴性 (预测值{prob:.3f} ≤ 阈值{threshold:.3f})")
+        
+        return "；".join(items) if items else "无有效预测"
+        
+    except Exception as e:
+        logger.error(f"Fallback AI summary failed: {e}")
+        return f"获取预测数据失败: {str(e)}"
+
 def _build_context_placeholders(patient_id: Optional[str]) -> Dict[str, str]:
     p: Optional[PatientData] = patients_data_cache.get(patient_id or "")
+    
+    # 从患者数据中获取基本信息
     name = getattr(p, "name", None) if p else None
     age = getattr(p, "age", None) if p and hasattr(p, "age") else None
     gender = getattr(p, "gender", None) if p and hasattr(p, "gender") else None
-    gender_zh = _zh_gender(gender)
     examine_time = getattr(p, "examine_time", None) if p else None
+    
+    # 如果患者数据中没有年龄和性别，尝试从推理结果文件中获取
+    if not age or not gender or not name:
+        try:
+            with open(RAW_JSON_PATH, 'r', encoding='utf-8') as f:
+                raw_data = json.load(f)
+                if patient_id and patient_id in raw_data:
+                    patient_info = raw_data[patient_id]
+                    if not age and "age" in patient_info:
+                        age = patient_info["age"]
+                    if not gender and "gender" in patient_info:
+                        gender = patient_info["gender"]
+                    if not name and "name" in patient_info:
+                        name = patient_info["name"]
+                    if not examine_time and "examineTime" in patient_info:
+                        examine_time = patient_info["examineTime"]
+        except Exception as e:
+            logger.warning(f"Failed to load additional patient info: {str(e)}")
 
-    # Load refined/original consultation for summary
+    # 从问诊数据中获取年龄和性别信息（优先级更高，因为这是用户填写的最新信息）
     with consultation_data_lock:
         cons_all = load_consultation_data()
-        # reuse existing selector
         ctx = _get_patient_context(patient_id or "")
-        idx = _find_best_matching_index(cons_all, ctx.get("name"), ctx.get("examineTime"))
-        cons = cons_all[idx].get("refined") if (idx is not None and isinstance(cons_all[idx].get("refined"), dict)) else (cons_all[idx] if idx is not None else None)
+        idx = _find_best_matching_index(cons_all, ctx.get("name") or name, ctx.get("examineTime") or examine_time)
+        cons = None
+        
+        if idx is not None:
+            base = cons_all[idx]
+            refined = base.get("refined")
+            # 优先使用refined数据，否则使用原始数据
+            if isinstance(refined, dict):
+                cons = refined
+            else:
+                cons = base
+        
+        # 从问诊数据中提取年龄和性别，如果存在的话
+        if cons:
+            if not age and cons.get("age"):
+                age = cons.get("age")
+            if not gender and cons.get("gender"):
+                gender = cons.get("gender")
+            if not name and cons.get("name"):
+                name = cons.get("name")
+
+    gender_zh = _zh_gender(gender)
 
     consultation_summary = _summarize_consultation(cons or {})
-    ai_left_summary = _summarize_ai(p, "left_eye")
-    ai_right_summary = _summarize_ai(p, "right_eye")
+    # 使用改进的AI预测总结
+    ai_left_summary = _summarize_ai_detailed(p, "left_eye")
+    ai_right_summary = _summarize_ai_detailed(p, "right_eye")
     threshold_summary = _summarize_thresholds(p)
     manual_summary = _summarize_manual(patient_id or "")
 
@@ -1017,21 +1262,65 @@ class LLMChatRequest(BaseModel):
 
 
 def _llm_env():
-    # Provider/base/model come from .env; no config file here
+    # OLLAMA本地部署配置
     return {
-        "base": os.getenv("LLM_API_BASE", "https://api.openai.com/v1"),
-        "key": os.getenv("LLM_API_KEY", "YOUR_API_KEY_HERE"),
-        "model": os.getenv("LLM_MODEL", "gpt-4o-mini"),
-        "provider": os.getenv("LLM_PROVIDER", "openai"),
+        "base": os.getenv("LLM_API_BASE", "http://10.138.6.3:50201"),
+        "model": os.getenv("LLM_MODEL", "DeepSeek-3.1:latest"),
+        "provider": os.getenv("LLM_PROVIDER", "ollama"),
     }
+
+def format_llm_output_for_frontend(text: str) -> str:
+    """
+    将LLM输出转换为前端友好的格式
+    支持基本的Markdown到HTML转换和换行处理
+    """
+    if not text:
+        return text
+    
+    # 处理换行符
+    text = text.replace('\n', '<br>')
+    
+    # 处理加粗 **text** -> <strong>text</strong>
+    import re
+    text = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', text)
+    
+    # 处理斜体 *text* -> <em>text</em>  
+    text = re.sub(r'\*(.*?)\*', r'<em>\1</em>', text)
+    
+    # 处理标题 ## text -> <h3>text</h3>
+    text = re.sub(r'^### (.*?)$', r'<h4>\1</h4>', text, flags=re.MULTILINE)
+    text = re.sub(r'^## (.*?)$', r'<h3>\1</h3>', text, flags=re.MULTILINE)
+    text = re.sub(r'^# (.*?)$', r'<h2>\1</h2>', text, flags=re.MULTILINE)
+    
+    # 处理列表项 - text -> <li>text</li>
+    lines = text.split('<br>')
+    formatted_lines = []
+    in_list = False
+    
+    for line in lines:
+        line = line.strip()
+        if line.startswith('- ') or line.startswith('• '):
+            if not in_list:
+                formatted_lines.append('<ul>')
+                in_list = True
+            formatted_lines.append(f'<li>{line[2:].strip()}</li>')
+        else:
+            if in_list:
+                formatted_lines.append('</ul>')
+                in_list = False
+            formatted_lines.append(line)
+    
+    if in_list:
+        formatted_lines.append('</ul>')
+    
+    return '<br>'.join(formatted_lines)
 
 @app.post("/api/llm_chat_stream")
 async def llm_chat_stream(req: LLMChatRequest):
     env = _llm_env()
     cfg = load_llm_prompts()
-    use_real = (env["key"] and env["key"] != "YOUR_API_KEY_HERE")
-
-    # Build messages_to_send (system + optional patient context + history)
+    
+    # 构建消息列表
     messages_to_send: List[Dict[str, str]] = []
     sys_prompt = cfg.get("system_prompt", "") or ""
     if sys_prompt:
@@ -1044,86 +1333,247 @@ async def llm_chat_stream(req: LLMChatRequest):
         if context_text.strip():
             messages_to_send.append({"role": "system", "content": f"[患者上下文]\n{context_text}"})
 
-    # Append incoming chat history (user prompt should be the last)
+    # 添加聊天历史
     messages_to_send.extend(req.messages or [])
 
-    # Capture last user prompt for persistence
+    # === 添加DEBUG日志 ===
+    logger.info("=" * 80)
+    logger.info(f"LLM Chat Request for Patient: {req.patient_id}")
+    logger.info("=" * 80)
+    logger.info(f"Environment: {env}")
+    logger.info(f"Messages count: {len(messages_to_send)}")
+    
+    for i, msg in enumerate(messages_to_send):
+        role = msg.get("role", "unknown")
+        content = msg.get("content", "")
+        logger.info(f"Message [{i+1}] ({role}):")
+        logger.info("-" * 40)
+        # 限制内容长度避免日志过长，但保持完整性
+        if len(content) > 500:
+            logger.info(f"{content[:500]}...\n[TRUNCATED - Total length: {len(content)} chars]")
+        else:
+            logger.info(content)
+        logger.info("-" * 40)
+    
+    logger.info("=" * 80)
+
+    # 获取最后一个用户消息用于持久化
     last_user = ""
     for m in reversed(req.messages or []):
         if m.get("role") == "user":
             last_user = m.get("content", "")
             break
 
-    # Buffer streamed assistant content for persistence after stream ends
+    # 缓存助手回复内容
     assistant_buf: List[str] = []
 
-    async def simulate_stream():
-        preface = "思考中…\n"
-        for ch in preface:
-            yield ch
-            await asyncio.sleep(0.02)
-        reply = f"（演示）已收到：{last_user}。这是一个流式输出示例。"
-        for token in reply.split():
-            assistant_buf.append(token + " ")
-            yield token + " "
-            await asyncio.sleep(0.04)
-        if req.persist and req.patient_id:
-            persist_llm_context(
-                req.patient_id,
-                system_prompt=sys_prompt,
-                context_text=context_text,
-                user_prompt=last_user,
-                assistant_text="".join(assistant_buf),
-                reset=bool(req.reset),
-            )
-
-    async def openai_stream():
-        url = f"{env['base'].rstrip('/')}/chat/completions"
-        headers = { "Authorization": f"Bearer {env['key']}", "Content-Type": "application/json" }
-        payload = { "model": env["model"], "messages": messages_to_send, "temperature": 0.2, "stream": True }
-        timeout = httpx.Timeout(60.0, read=60.0)
+    async def ollama_stream():
+        # OLLAMA API端点
+        url = f"{env['base'].rstrip('/')}/api/chat"
+        headers = {"Content-Type": "application/json"}
+        payload = {
+            "model": env["model"],
+            "messages": messages_to_send,
+            "stream": True
+        }
+        
+        # === 添加请求payload日志 ===
+        logger.info(f"Sending request to OLLAMA: {url}")
+        logger.info(f"Payload model: {payload['model']}")
+        logger.info(f"Payload stream: {payload['stream']}")
+        logger.info(f"Payload messages: {messages_to_send}")
+        
+        timeout = httpx.Timeout(120.0, read=120.0)
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 async with client.stream("POST", url, headers=headers, json=payload) as r:
+                    logger.info(f"OLLAMA Response Status: {r.status_code}")
+                    
+                    if r.status_code != 200:
+                        error_text = await r.atext()
+                        logger.error(f"OLLAMA Error Response: {error_text}")
+                        yield f"\n[OLLAMA error] HTTP {r.status_code}: {error_text}\n"
+                        return
+                    
+                    response_chunks = 0
                     async for raw_line in r.aiter_lines():
-                        if not raw_line: continue
-                        line = raw_line.strip()
-                        if line.startswith(":") or not line.startswith("data:"): continue
-                        data = line[len("data:"):].strip()
-                        if data in ("", "null"): continue
-                        if data == "[DONE]": break
-                        try:
-                            obj = json.loads(data)
-                        except Exception:
+                        if not raw_line:
                             continue
-                        if not isinstance(obj, dict): continue
+                        line = raw_line.strip()
+                        if not line:
+                            continue
+                        
+                        response_chunks += 1
+                        if response_chunks == 1:
+                            logger.info("Started receiving OLLAMA streaming response...")
+                        
+                        try:
+                            obj = json.loads(line)
+                        except json.JSONDecodeError:
+                            logger.warning(f"Failed to parse JSON line: {line[:100]}...")
+                            continue
+                        
+                        if not isinstance(obj, dict):
+                            continue
+                            
+                        # 检查是否有错误
                         if "error" in obj:
-                            msg = (obj.get("error") or {}).get("message", "LLM provider error")
-                            yield f"\n[LLM error] {msg}\n"
+                            logger.error(f"OLLAMA Stream Error: {obj['error']}")
+                            yield f"\n[OLLAMA error] {obj['error']}\n"
                             break
-                        choices = obj.get("choices") or []
-                        if not isinstance(choices, list) or len(choices) == 0: continue
-                        for ch in choices:
-                            delta = ch.get("delta") or {}
-                            content = (delta.get("content") or ch.get("text")) or ""
-                            if content:
-                                assistant_buf.append(content)
-                                yield content
+                        
+                        # 获取消息内容
+                        message = obj.get("message", {})
+                        content = message.get("content", "")
+                        
+                        if content:
+                            assistant_buf.append(content)
+                            yield content
+                        
+                        # 检查是否完成
+                        if obj.get("done", False):
+                            logger.info(f"OLLAMA response completed. Total chunks: {response_chunks}")
+                            logger.info(f"Assistant response length: {len(''.join(assistant_buf))} chars")
+                            break
+                            
+        except httpx.TimeoutException:
+            logger.error("OLLAMA request timeout")
+            yield "\n[OLLAMA 错误] 请求超时，请检查OLLAMA服务是否正常运行\n"
+        except httpx.ConnectError:
+            logger.error(f"Cannot connect to OLLAMA service: {env['base']}")
+            yield f"\n[OLLAMA 错误] 无法连接到OLLAMA服务 {env['base']}\n"
+        except Exception as e:
+            logger.error(f"OLLAMA request failed: {str(e)}")
+            yield f"\n[OLLAMA 错误] {str(e)}\n"
         finally:
             if req.persist and req.patient_id and assistant_buf:
+                full_response = "".join(assistant_buf)
+                logger.info(f"Persisting LLM context for patient {req.patient_id}")
                 persist_llm_context(
                     req.patient_id,
                     system_prompt=sys_prompt,
                     context_text=context_text,
                     user_prompt=last_user,
-                    assistant_text="".join(assistant_buf),
+                    assistant_text=full_response,
                     reset=bool(req.reset),
                 )
 
-    if not use_real:
-        return StreamingResponse(simulate_stream(), media_type="text/plain; charset=utf-8")
-    return StreamingResponse(openai_stream(), media_type="text/plain; charset=utf-8")
+    # 使用流式OLLAMA调用
+    return StreamingResponse(ollama_stream(), media_type="text/plain; charset=utf-8")
 
+
+@app.post("/api/llm_chat_formatted")
+async def llm_chat_formatted(req: LLMChatRequest):
+    """
+    提供格式化的LLM响应（非流式），支持HTML格式
+    """
+    env = _llm_env()
+    cfg = load_llm_prompts()
+    
+    # 构建消息（与流式版本相同的逻辑）
+    messages_to_send: List[Dict[str, str]] = []
+    sys_prompt = cfg.get("system_prompt", "") or ""
+    if sys_prompt:
+        messages_to_send.append({"role": "system", "content": sys_prompt})
+
+    context_text = ""
+    if cfg.get("include_patient_context", True):
+        placeholders = _build_context_placeholders(req.patient_id)
+        context_text = _fill_template(cfg.get("context_template", ""), placeholders)
+        if context_text.strip():
+            messages_to_send.append({"role": "system", "content": f"[患者上下文]\n{context_text}"})
+
+    messages_to_send.extend(req.messages or [])
+    
+    # === 添加DEBUG日志（非流式版本） ===
+    logger.info("=" * 80)
+    logger.info(f"LLM Chat Formatted Request for Patient: {req.patient_id}")
+    logger.info("=" * 80)
+    logger.info(f"Environment: {env}")
+    logger.info(f"Messages count: {len(messages_to_send)}")
+    
+    for i, msg in enumerate(messages_to_send):
+        role = msg.get("role", "unknown")
+        content = msg.get("content", "")
+        logger.info(f"Message [{i+1}] ({role}):")
+        logger.info("-" * 40)
+        if len(content) > 500:
+            logger.info(f"{content[:500]}...\n[TRUNCATED - Total length: {len(content)} chars]")
+        else:
+            logger.info(content)
+        logger.info("-" * 40)
+    
+    logger.info("=" * 80)
+    
+    last_user = ""
+    for m in reversed(req.messages or []):
+        if m.get("role") == "user":
+            last_user = m.get("content", "")
+            break
+
+    # 非流式请求
+    url = f"{env['base'].rstrip('/')}/api/chat"
+    headers = {"Content-Type": "application/json"}
+    payload = {
+        "model": env["model"],
+        "messages": messages_to_send,
+        "stream": False
+    }
+    
+    logger.info(f"Sending formatted request to OLLAMA: {url}")
+    logger.info(f"Payload model: {payload['model']}")
+    logger.info(f"Payload stream: {payload['stream']}")
+    
+    timeout = httpx.Timeout(120.0)
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(url, headers=headers, json=payload)
+            logger.info(f"OLLAMA Formatted Response Status: {response.status_code}")
+            
+            if response.status_code != 200:
+                error_text = response.text
+                logger.error(f"OLLAMA Formatted Error: {error_text}")
+                return {"error": f"HTTP {response.status_code}: {error_text}"}
+            
+            result = response.json()
+            if "error" in result:
+                logger.error(f"OLLAMA Formatted Response Error: {result['error']}")
+                return {"error": result["error"]}
+            
+            message = result.get("message", {})
+            content = message.get("content", "")
+            
+            if content:
+                logger.info(f"OLLAMA Formatted Response Length: {len(content)} chars")
+                logger.info(f"OLLAMA Formatted Response Preview: {content[:200]}...")
+                
+                # 格式化输出
+                formatted_content = format_llm_output_for_frontend(content)
+                
+                # 持久化
+                if req.persist and req.patient_id:
+                    logger.info(f"Persisting formatted LLM context for patient {req.patient_id}")
+                    persist_llm_context(
+                        req.patient_id,
+                        system_prompt=sys_prompt,
+                        context_text=context_text,
+                        user_prompt=last_user,
+                        assistant_text=content,
+                        reset=bool(req.reset),
+                    )
+                
+                return {
+                    "content": content,
+                    "formatted_content": formatted_content,
+                    "status": "success"
+                }
+            else:
+                logger.warning("Empty response from OLLAMA formatted endpoint")
+                return {"error": "Empty response from OLLAMA"}
+            
+    except Exception as e:
+        logger.error(f"OLLAMA formatted request failed: {str(e)}")
+        return {"error": f"Request failed: {str(e)}"}
 
 # Run the FastAPI application
 if __name__ == "__main__":

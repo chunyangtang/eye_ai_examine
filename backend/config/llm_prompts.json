@@ -1,6 +1,6 @@
 {
-  "system_prompt": "你是眼科临床助手，请用简洁中文回答，避免冗长推理，仅给出可操作建议与结论。",
-  "update_prompt": "请基于最新问诊信息、AI预测与人工复检结果，生成简要且可操作的【临床推理过程】与【意见摘要】两段内容。",
+  "system_prompt": "你是一位眼科医生助手。请直接给出临床分析，不要重复我的指令或解释你的角色。回答应简洁专业，重点关注诊断建议和临床意义。涉及用药时仅提供就医建议。",
+  "update_prompt": "基于提供的患者信息，直接给出临床分析和建议，分为两部分：1）临床推理过程 2）意见摘要",
   "include_patient_context": true,
-  "context_template": "患者：{patient_name}（{age}岁，{gender_zh}），检查时间：{examine_time}\n问诊要点：{consultation_summary}\nAI预测（左眼）：{ai_left_summary}\nAI预测（右眼）：{ai_right_summary}\n人工复核：{manual_summary}\n阈值：{threshold_summary}"
+  "context_template": "**患者信息**：{patient_name}，{age}岁，{gender_zh}，检查时间：{examine_time}\n\n**问诊要点**：{consultation_summary}\n\n**AI辅助诊断**：左眼：{ai_left_summary}；右眼：{ai_right_summary}\n\n**人工复核**：{manual_summary}"
 }
