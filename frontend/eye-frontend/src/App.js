@@ -1,5 +1,31 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 
+const renderMarkdownContent = (content) => {
+  if (!content) return '';
+  
+  // 处理换行
+  let html = content.replace(/\n/g, '<br>');
+  
+  // 处理加粗 **text** -> <strong>text</strong>
+  html = html.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+  
+  // 处理斜体 *text* -> <em>text</em>
+  html = html.replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, '<em>$1</em>');
+  
+  // 处理标题
+  html = html.replace(/^### (.*?)(<br>|$)/gm, '<h4 class="text-md font-semibold text-gray-800 mt-3 mb-1">$1</h4>');
+  html = html.replace(/^## (.*?)(<br>|$)/gm, '<h3 class="text-lg font-semibold text-gray-800 mt-3 mb-2">$1</h3>');
+  html = html.replace(/^# (.*?)(<br>|$)/gm, '<h2 class="text-xl font-bold text-gray-900 mt-4 mb-2">$1</h2>');
+  
+  // 处理列表项 - text -> <li>text</li>
+  html = html.replace(/^- (.*?)(<br>|$)/gm, '<li class="ml-4 mb-1">• $1</li>');
+  
+  // 处理数字列表 1. text -> <li>text</li>
+  html = html.replace(/^\d+\. (.*?)(<br>|$)/gm, '<li class="ml-4 mb-1 list-decimal">$1</li>');
+  
+  return html;
+};
+
 // Reusable Button Component
 const IconButton = ({ children, onClick, className = '' }) => (
   <button
@@ -1717,12 +1743,27 @@ function App() {
                       <div className="text-gray-400 text-sm">暂无对话</div>
                     )}
                     {sideChatMessages.map((m, i) => (
-                      <div key={i} className={`mb-2 ${m.role === 'user' ? 'text-right' : 'text-left'}`}>
-                        <span className={`inline-block px-2 py-1 rounded ${
-                          m.role === 'user' ? 'bg-blue-100 text-blue-900' : 'bg-white text-gray-800 border border-gray-200'
+                      <div key={i} className={`mb-3 ${m.role === 'user' ? 'text-right' : 'text-left'}`}>
+                        <div className={`inline-block px-3 py-2 rounded-lg max-w-[90%] ${
+                          m.role === 'user' 
+                            ? 'bg-blue-100 text-blue-900' 
+                            : 'bg-white text-gray-800 border border-gray-200 shadow-sm'
                         }`}>
-                          {m.content}
-                        </span>
+                          {m.role === 'user' ? (
+                            <span className="text-sm whitespace-pre-wrap">{m.content}</span>
+                          ) : (
+                            <div className="text-sm">
+                              <div 
+                                className="prose prose-sm max-w-none prose-headings:mt-2 prose-headings:mb-1 prose-p:my-1"
+                                dangerouslySetInnerHTML={{ __html: renderMarkdownContent(m.content) }}
+                              />
+                              {/* 添加光标效果（仅对正在接收的最后一条消息） */}
+                              {llmLoading && i === sideChatMessages.length - 1 && (
+                                <span className="inline-block w-2 h-4 bg-gray-400 ml-1 animate-pulse" />
+                              )}
+                            </div>
+                          )}
+                        </div>
                       </div>
                     ))}
                     {!autoScrollChat && (

@@ -1323,46 +1323,130 @@ async def llm_chat_stream(req: LLMChatRequest):
     # 构建消息列表
     messages_to_send: List[Dict[str, str]] = []
     sys_prompt = cfg.get("system_prompt", "") or ""
-    if sys_prompt:
-        messages_to_send.append({"role": "system", "content": sys_prompt})
-
-    context_text = ""
-    if cfg.get("include_patient_context", True):
-        placeholders = _build_context_placeholders(req.patient_id)
-        context_text = _fill_template(cfg.get("context_template", ""), placeholders)
+    
+    # 检查是否是首次更新推理请求（只有一个user消息且内容是update_prompt）
+    is_initial_update = (
+        len(req.messages or []) == 1 and 
+        req.messages[0].get("role") == "user" and
+        req.messages[0].get("content", "").strip() == cfg.get("update_prompt", "").strip()
+    )
+    
+    if is_initial_update:
+        # 对于初次更新推理请求，将所有信息合并为一个user prompt
+        context_text = ""
+        if cfg.get("include_patient_context", True):
+            placeholders = _build_context_placeholders(req.patient_id)
+            context_text = _fill_template(cfg.get("context_template", ""), placeholders)
+        
+        # 构建完整的单个user prompt
+        combined_prompt_parts = []
+        
+        # 添加系统角色说明
+        if sys_prompt:
+            combined_prompt_parts.append(f"角色要求：{sys_prompt}")
+        
+        # 添加患者上下文
         if context_text.strip():
-            messages_to_send.append({"role": "system", "content": f"[患者上下文]\n{context_text}"})
+            combined_prompt_parts.append(f"患者信息：\n{context_text}")
+        
+        # 添加任务要求
+        update_prompt = cfg.get("update_prompt", "基于提供的患者信息，直接给出临床分析和建议，分为两部分：1）临床推理过程 2）意见摘要")
+        combined_prompt_parts.append(f"任务要求：{update_prompt}")
+        
+        # 合并为单个user消息
+        combined_content = "\n\n".join(combined_prompt_parts)
+        messages_to_send.append({"role": "user", "content": combined_content})
+        
+    else:
+        # 对于后续对话，也使用user方式传递上下文信息
+        context_text = ""
+        if cfg.get("include_patient_context", True):
+            placeholders = _build_context_placeholders(req.patient_id)
+            context_text = _fill_template(cfg.get("context_template", ""), placeholders)
+        
+        # 构建包含上下文的user消息作为第一条消息
+        context_prompt_parts = []
+        
+        # 添加系统角色说明
+        if sys_prompt:
+            context_prompt_parts.append(f"角色要求：{sys_prompt}")
+        
+        # 添加患者上下文
+        if context_text.strip():
+            context_prompt_parts.append(f"患者信息：\n{context_text}")
+        
+        # 如果有上下文信息，将其作为第一条user消息
+        if context_prompt_parts:
+            context_content = "\n\n".join(context_prompt_parts)
+            messages_to_send.append({"role": "user", "content": context_content})
+            # 添加一个简短的assistant确认消息
+            messages_to_send.append({"role": "assistant", "content": "已了解患者信息和角色要求。"})
 
-    # 添加聊天历史
-    messages_to_send.extend(req.messages or [])
+        # 加载历史对话记录
+        if req.patient_id:
+            try:
+                with _infer_lock:
+                    d = load_inference_map()
+                    rec = d.get(req.patient_id, {})
+                    llm_context = rec.get("llm_context", {})
+                    history = llm_context.get("history", [])
+                    
+                    if isinstance(history, list) and history:
+                        # 只保留user/assistant对话，跳过任何system消息
+                        conversation_history = [
+                            msg for msg in history 
+                            if isinstance(msg, dict) and 
+                            msg.get("role") in ["user", "assistant"] and 
+                            msg.get("content", "").strip()
+                        ]
+                        
+                        # 添加历史对话
+                        messages_to_send.extend(conversation_history)
+                        logger.info(f"Loaded {len(conversation_history)} historical messages for patient {req.patient_id}")
+                    else:
+                        logger.info(f"No conversation history found for patient {req.patient_id}")
+            except Exception as e:
+                logger.warning(f"Failed to load conversation history for patient {req.patient_id}: {e}")
+
+        # 添加当前请求的新消息
+        current_messages = req.messages or []
+        # 只添加user消息，因为assistant消息应该来自历史记录
+        new_user_messages = [
+            msg for msg in current_messages 
+            if msg.get("role") == "user"
+        ]
+        messages_to_send.extend(new_user_messages)
 
     # === 添加DEBUG日志 ===
     logger.info("=" * 80)
-    logger.info(f"LLM Chat Request for Patient: {req.patient_id}")
+    logger.info(f"LLM Chat Request for Patient: {req.patient_id} ({'INITIAL_UPDATE' if is_initial_update else 'FOLLOW_UP'})")
     logger.info("=" * 80)
     logger.info(f"Environment: {env}")
     logger.info(f"Messages count: {len(messages_to_send)}")
     
-    for i, msg in enumerate(messages_to_send):
-        role = msg.get("role", "unknown")
-        content = msg.get("content", "")
-        logger.info(f"Message [{i+1}] ({role}):")
-        logger.info("-" * 40)
-        # 限制内容长度避免日志过长，但保持完整性
-        if len(content) > 500:
-            logger.info(f"{content[:500]}...\n[TRUNCATED - Total length: {len(content)} chars]")
-        else:
-            logger.info(content)
-        logger.info("-" * 40)
+    # for i, msg in enumerate(messages_to_send):
+    #     role = msg.get("role", "unknown")
+    #     content = msg.get("content", "")
+    #     logger.info(f"Message [{i+1}] ({role}):")
+    #     logger.info("-" * 40)
+    #     if len(content) > 500:
+    #         logger.info(f"{content[:500]}...\n[TRUNCATED - Total length: {len(content)} chars]")
+    #     else:
+    #         logger.info(content)
+    #     logger.info("-" * 40)
     
-    logger.info("=" * 80)
+    # logger.info("=" * 80)
 
     # 获取最后一个用户消息用于持久化
     last_user = ""
-    for m in reversed(req.messages or []):
-        if m.get("role") == "user":
-            last_user = m.get("content", "")
-            break
+    if is_initial_update:
+        last_user = cfg.get("update_prompt", "")
+    else:
+        # 从当前请求中获取最新的用户消息
+        for m in reversed(req.messages or []):
+            if m.get("role") == "user":
+                last_user = m.get("content", "")
+                break
 
     # 缓存助手回复内容
     assistant_buf: List[str] = []
@@ -1377,11 +1461,11 @@ async def llm_chat_stream(req: LLMChatRequest):
             "stream": True
         }
         
-        # === 添加请求payload日志 ===
         logger.info(f"Sending request to OLLAMA: {url}")
         logger.info(f"Payload model: {payload['model']}")
         logger.info(f"Payload stream: {payload['stream']}")
-        logger.info(f"Payload messages: {messages_to_send}")
+        logger.info(f"Payload messages: {payload['messages']}")
+        logger.info(f"Request type: {'COMBINED_USER_PROMPT' if is_initial_update else 'USER_CONTEXT_PROMPT'}")
         
         timeout = httpx.Timeout(120.0, read=120.0)
         try:
@@ -1416,13 +1500,11 @@ async def llm_chat_stream(req: LLMChatRequest):
                         if not isinstance(obj, dict):
                             continue
                             
-                        # 检查是否有错误
                         if "error" in obj:
                             logger.error(f"OLLAMA Stream Error: {obj['error']}")
                             yield f"\n[OLLAMA error] {obj['error']}\n"
                             break
                         
-                        # 获取消息内容
                         message = obj.get("message", {})
                         content = message.get("content", "")
                         
@@ -1430,7 +1512,6 @@ async def llm_chat_stream(req: LLMChatRequest):
                             assistant_buf.append(content)
                             yield content
                         
-                        # 检查是否完成
                         if obj.get("done", False):
                             logger.info(f"OLLAMA response completed. Total chunks: {response_chunks}")
                             logger.info(f"Assistant response length: {len(''.join(assistant_buf))} chars")
@@ -1438,54 +1519,70 @@ async def llm_chat_stream(req: LLMChatRequest):
                             
         except httpx.TimeoutException:
             logger.error("OLLAMA request timeout")
-            yield "\n[OLLAMA 错误] 请求超时，请检查OLLAMA服务是否正常运行\n"
+            yield "\n[OLLAMA **错误**] 请求超时，请检查OLLAMA服务是否正常运行\n"
         except httpx.ConnectError:
             logger.error(f"Cannot connect to OLLAMA service: {env['base']}")
-            yield f"\n[OLLAMA 错误] 无法连接到OLLAMA服务 {env['base']}\n"
+            yield f"\n[OLLAMA **错误**] 无法连接到OLLAMA服务 {env['base']}\n"
         except Exception as e:
             logger.error(f"OLLAMA request failed: {str(e)}")
-            yield f"\n[OLLAMA 错误] {str(e)}\n"
+            yield f"\n[OLLAMA **错误**] {str(e)}\n"
         finally:
             if req.persist and req.patient_id and assistant_buf:
                 full_response = "".join(assistant_buf)
                 logger.info(f"Persisting LLM context for patient {req.patient_id}")
+                
                 persist_llm_context(
                     req.patient_id,
-                    system_prompt=sys_prompt,
-                    context_text=context_text,
+                    system_prompt="",  # 不再使用system_prompt持久化
+                    context_text="",   # 不再单独存储context_text
                     user_prompt=last_user,
                     assistant_text=full_response,
                     reset=bool(req.reset),
                 )
 
-    # 使用流式OLLAMA调用
     return StreamingResponse(ollama_stream(), media_type="text/plain; charset=utf-8")
 
-
+# 同样更新格式化版本
 @app.post("/api/llm_chat_formatted")
 async def llm_chat_formatted(req: LLMChatRequest):
     """
-    提供格式化的LLM响应（非流式），支持HTML格式
+    提供格式化的LLM响应（非流式），支持HTML格式，统一使用user方式传递上下文
     """
     env = _llm_env()
     cfg = load_llm_prompts()
     
-    # 构建消息（与流式版本相同的逻辑）
+    # 构建消息（统一使用user方式）
     messages_to_send: List[Dict[str, str]] = []
     sys_prompt = cfg.get("system_prompt", "") or ""
-    if sys_prompt:
-        messages_to_send.append({"role": "system", "content": sys_prompt})
-
+    
+    # 构建上下文信息
     context_text = ""
     if cfg.get("include_patient_context", True):
         placeholders = _build_context_placeholders(req.patient_id)
         context_text = _fill_template(cfg.get("context_template", ""), placeholders)
-        if context_text.strip():
-            messages_to_send.append({"role": "system", "content": f"[患者上下文]\n{context_text}"})
+    
+    # 构建包含上下文的user消息
+    context_prompt_parts = []
+    
+    # 添加系统角色说明
+    if sys_prompt:
+        context_prompt_parts.append(f"角色要求：{sys_prompt}")
+    
+    # 添加患者上下文
+    if context_text.strip():
+        context_prompt_parts.append(f"患者信息：\n{context_text}")
+    
+    # 如果有上下文信息，将其作为第一条user消息
+    if context_prompt_parts:
+        context_content = "\n\n".join(context_prompt_parts)
+        messages_to_send.append({"role": "user", "content": context_content})
+        # 添加一个简短的assistant确认消息
+        messages_to_send.append({"role": "assistant", "content": "已了解患者信息和角色要求。"})
 
+    # 添加当前请求的消息
     messages_to_send.extend(req.messages or [])
     
-    # === 添加DEBUG日志（非流式版本） ===
+    # === 添加DEBUG日志 ===
     logger.info("=" * 80)
     logger.info(f"LLM Chat Formatted Request for Patient: {req.patient_id}")
     logger.info("=" * 80)
@@ -1555,8 +1652,8 @@ async def llm_chat_formatted(req: LLMChatRequest):
                     logger.info(f"Persisting formatted LLM context for patient {req.patient_id}")
                     persist_llm_context(
                         req.patient_id,
-                        system_prompt=sys_prompt,
-                        context_text=context_text,
+                        system_prompt="",  # 不再使用system_prompt
+                        context_text="",   # 不再单独存储context_text
                         user_prompt=last_user,
                         assistant_text=content,
                         reset=bool(req.reset),
