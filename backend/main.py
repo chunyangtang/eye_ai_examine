@@ -46,7 +46,10 @@ manual_diagnosis_storage: Dict[str, ManualDiagnosisData] = {}
 raw_probs_cache: Dict[str, Dict[str, Any]] = {}
 
 RAW_JSON_PATH = "../data/inference_results.json"
-INFERENCE_RESULTS_PATH = RAW_JSON_PATH
+
+EXAMINE_RESULTS_PATH = "../data/examine_results.json"
+INFERENCE_RESULTS_PATH = EXAMINE_RESULTS_PATH
+
 # Path to questionnaire data from the other project
 CONSULTATION_DATA_PATH = os.path.normpath(
     os.path.join(os.path.dirname(__file__), "../../eye_ai_consultation/data/questionnaire_data.json")
@@ -164,9 +167,8 @@ async def get_patient_by_id(ris_exam_id: str):
 async def get_available_patient_ids():
     """Returns a list of available patient IDs from the data source."""
     try:
-        import json
-        # Only load the JSON keys, not the full data
-        with open("../data/inference_results.json", "r", encoding="utf-8") as f:
+        # Only load the JSON keys, not the full data (read-only RAW file)
+        with open(RAW_JSON_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
         patient_ids = list(data.keys())
         print(f"Found {len(patient_ids)} available patients")
@@ -1279,16 +1281,40 @@ def _fill_template(template: str, mapping: Dict[str, str]) -> str:
 
 
 def load_inference_map() -> Dict[str, Any]:
-    if not os.path.exists(INFERENCE_RESULTS_PATH):
-        return {}
+    """
+    Read-only loader for overlay file (examine_results.json).
+    Fallback (read-only): if overlay missing or empty, try to extract only llm_context
+    from RAW_JSON_PATH (legacy polluted data), but NEVER write back to RAW.
+    """
+    # 1) Prefer overlay
     try:
-        with open(INFERENCE_RESULTS_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            return data if isinstance(data, dict) else {}
+        if os.path.exists(INFERENCE_RESULTS_PATH):
+            with open(INFERENCE_RESULTS_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
     except Exception:
-        return {}
+        pass
+
+    # 2) Fallback: probe legacy llm_context from RAW (read-only)
+    try:
+        if os.path.exists(RAW_JSON_PATH):
+            with open(RAW_JSON_PATH, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            if isinstance(raw, dict):
+                overlay: Dict[str, Any] = {}
+                for k, v in raw.items():
+                    if isinstance(v, dict) and "llm_context" in v and isinstance(v["llm_context"], dict):
+                        overlay[k] = {"llm_context": v["llm_context"]}
+                return overlay
+    except Exception:
+        pass
+    return {}
 
 def save_inference_map(d: Dict[str, Any]) -> None:
+    """
+    Write ONLY to overlay (examine_results.json). Do not touch RAW_JSON_PATH.
+    """
     os.makedirs(os.path.dirname(INFERENCE_RESULTS_PATH), exist_ok=True)
     with open(INFERENCE_RESULTS_PATH, "w", encoding="utf-8") as f:
         json.dump(d, f, ensure_ascii=False, indent=2)
@@ -1345,7 +1371,13 @@ async def get_llm_context(patient_id: str):
         ctx = rec.get("llm_context") or {}
         if not isinstance(ctx, dict):
             ctx = {}
-        return {"status": "ok", "patient_id": patient_id, "llm_context": ctx, "path": INFERENCE_RESULTS_PATH}
+        return {
+            "status": "ok",
+            "patient_id": patient_id,
+            "llm_context": ctx,
+            "path": INFERENCE_RESULTS_PATH,   # write/read overlay path
+            "raw_path": RAW_JSON_PATH         # read-only RAW path for reference
+        }
 
 @app.delete("/api/llm_context/{patient_id}")
 async def delete_llm_context(patient_id: str):
@@ -1778,7 +1810,6 @@ async def llm_chat_formatted(req: LLMChatRequest):
         logger.error(f"OLLAMA formatted request failed: {str(e)}")
         return {"error": f"Request failed: {str(e)}"}
 
-# Run the FastAPI application
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
