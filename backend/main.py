@@ -461,7 +461,7 @@ class ConsultationData(BaseModel):
         extra = 'allow'  # tolerate extra keys
 
 class SaveConsultationRequest(BaseModel):
-    patient_id: str
+    ris_exam_id: str  # 修改为ris_exam_id
     consultation_data: ConsultationData
 
 
@@ -571,13 +571,13 @@ def find_best_matching_consultation(all_data: List[Dict[str, Any]], patient_name
     return None
 
 # --- Helpers for patient context ---
-def _get_patient_context(patient_id: str) -> Dict[str, Optional[str]]:
+def _get_patient_context(ris_exam_id: str) -> Dict[str, Optional[str]]:
     """
     Returns {'name': str|None, 'examineTime': str|None} from cache, else from RAW_JSON_PATH.
     """
     ctx = {"name": None, "examineTime": None}
     try:
-        patient = patients_data_cache.get(patient_id)
+        patient = patients_data_cache.get(ris_exam_id)
         if patient:
             ctx["name"] = getattr(patient, "name", None)
             ctx["examineTime"] = getattr(patient, "examine_time", None)
@@ -590,7 +590,7 @@ def _get_patient_context(patient_id: str) -> Dict[str, Optional[str]]:
     try:
         with open(RAW_JSON_PATH, "r", encoding="utf-8") as f:
             all_json = json.load(f)
-        raw = all_json.get(patient_id, {})
+        raw = all_json.get(ris_exam_id, {})
         if isinstance(raw, dict):
             ctx["name"] = raw.get("name")
             ctx["examineTime"] = raw.get("examineTime")
@@ -650,16 +650,72 @@ def _find_best_matching_index(all_data: List[Dict[str, Any]], patient_name: Opti
     return None
 
 # --- API: get/save consultation ---
-@app.get("/api/consultation/{patient_id}")
-async def get_consultation_info(patient_id: str):
-    # Obtain patient context
-    ctx = _get_patient_context(patient_id)
-    patient_name = ctx.get("name")
+@app.get("/api/consultation/{ris_exam_id}")
+async def get_consultation_info(ris_exam_id: str, patient_name: Optional[str] = None):
+    """
+    获取问诊信息
+    - 如果提供patient_name参数，优先使用该名称搜索问诊信息
+    - 否则使用ris_exam_id对应的患者名称搜索
+    """
+    # 获取患者上下文
+    ctx = _get_patient_context(ris_exam_id)
+    
+    # 决定使用哪个患者姓名进行搜索
+    search_name = patient_name if patient_name else ctx.get("name")
     examine_time = ctx.get("examineTime")
 
     with consultation_data_lock:
         all_consultations = load_consultation_data()
-        idx = _find_best_matching_index(all_consultations, patient_name, examine_time)
+        
+        # 如果提供了patient_name，返回所有同名的问诊记录供选择
+        if patient_name:
+            same_name_consultations = []
+            for i, consultation in enumerate(all_consultations):
+                if consultation.get("name") == patient_name:
+                    # 构建显示信息
+                    base_info = {
+                        "index": i,
+                        "name": consultation.get("name"),
+                        "age": consultation.get("age"),
+                        "gender": consultation.get("gender"),
+                        "phone": consultation.get("phone"),
+                        "submissionTime": consultation.get("submissionTime"),
+                        "hasRefined": "refined" in consultation and isinstance(consultation["refined"], dict)
+                    }
+                    
+                    # 如果有refined数据，也添加refined的信息
+                    if base_info["hasRefined"]:
+                        refined = consultation["refined"]
+                        refined_info = base_info.copy()
+                        refined_info.update({
+                            "age": refined.get("age", base_info["age"]),
+                            "gender": refined.get("gender", base_info["gender"]),
+                            "phone": refined.get("phone", base_info["phone"]),
+                            "submissionTime": refined.get("refinedTime", refined.get("submissionTime", base_info["submissionTime"])),
+                            "isRefined": True
+                        })
+                        same_name_consultations.append(refined_info)
+                    else:
+                        base_info["isRefined"] = False
+                        same_name_consultations.append(base_info)
+            
+            # 按提交时间排序
+            same_name_consultations.sort(
+                key=lambda x: _parse_iso_to_aware_dt(x.get("submissionTime")) or datetime.datetime.min.replace(tzinfo=datetime.timezone.utc),
+                reverse=True
+            )
+            
+            return {
+                "consultation_data": None,
+                "status": "multiple_matches",
+                "same_name_consultations": same_name_consultations,
+                "search_name": patient_name,
+                "source": "questionnaire_data.json",
+                "path": CONSULTATION_DATA_PATH,
+            }
+        
+        # 原有逻辑：根据名称和时间匹配最佳问诊记录
+        idx = _find_best_matching_index(all_consultations, search_name, examine_time)
         if idx is None:
             return {
                 "consultation_data": None,
@@ -670,15 +726,14 @@ async def get_consultation_info(patient_id: str):
 
         base = all_consultations[idx]
         refined = base.get("refined")
-        # Prefer refined; if present, surface refinedTime as submissionTime for display
+        # 优先使用refined数据
         if isinstance(refined, dict):
             result = dict(refined)
             result.setdefault("name", base.get("name"))
-            # Show refinedTime as submissionTime for UI consistency
+            # 显示refinedTime作为submissionTime
             if "refinedTime" in result:
                 result.setdefault("submissionTime", result.get("refinedTime"))
             else:
-                # fallback to base submissionTime
                 result.setdefault("submissionTime", base.get("submissionTime"))
             return {
                 "consultation_data": result,
@@ -687,7 +742,7 @@ async def get_consultation_info(patient_id: str):
                 "path": CONSULTATION_DATA_PATH
             }
         else:
-            # Return original item minimally (only fields the UI uses)
+            # 返回原始数据
             minimal = {
                 "name": base.get("name"),
                 "age": base.get("age"),
@@ -706,9 +761,59 @@ async def get_consultation_info(patient_id: str):
                 "path": CONSULTATION_DATA_PATH
             }
 
+### 2. 修改根据索引获取特定问诊记录的API
+
+@app.get("/api/consultation/{ris_exam_id}/by_index/{consultation_index}")
+async def get_consultation_by_index(ris_exam_id: str, consultation_index: int, use_refined: bool = True):
+    """
+    根据索引获取特定的问诊记录
+    """
+    with consultation_data_lock:
+        all_consultations = load_consultation_data()
+        
+        if consultation_index < 0 or consultation_index >= len(all_consultations):
+            raise HTTPException(status_code=404, detail="Consultation index out of range")
+        
+        base = all_consultations[consultation_index]
+        
+        if use_refined and "refined" in base and isinstance(base["refined"], dict):
+            # 使用refined数据
+            result = dict(base["refined"])
+            result.setdefault("name", base.get("name"))
+            if "refinedTime" in result:
+                result.setdefault("submissionTime", result.get("refinedTime"))
+            else:
+                result.setdefault("submissionTime", base.get("submissionTime"))
+            return {
+                "consultation_data": result,
+                "status": "success_refined",
+                "source": f"questionnaire_data.json[{consultation_index}].refined",
+                "path": CONSULTATION_DATA_PATH
+            }
+        else:
+            # 使用原始数据
+            minimal = {
+                "name": base.get("name"),
+                "age": base.get("age"),
+                "gender": base.get("gender"),
+                "phone": base.get("phone"),
+                "affectedArea": base.get("affectedArea"),
+                "leftEye": base.get("leftEye"),
+                "rightEye": base.get("rightEye"),
+                "bothEyes": base.get("bothEyes"),
+                "submissionTime": base.get("submissionTime"),
+            }
+            return {
+                "consultation_data": minimal,
+                "status": "success_original",
+                "source": f"questionnaire_data.json[{consultation_index}]",
+                "path": CONSULTATION_DATA_PATH
+            }
+
+# 保存问诊信息的API也需要修改参数名
 @app.post("/api/consultation")
 async def save_consultation_info(request: SaveConsultationRequest):
-    # Normalize and save as "refined" inside original questionnaire item
+    # 需要修改SaveConsultationRequest中的字段名
     with consultation_data_lock:
         all_consultations = load_consultation_data()
 
@@ -718,17 +823,17 @@ async def save_consultation_info(request: SaveConsultationRequest):
 
         # Ensure name if missing
         if not refined_payload.get("name"):
-            ctx = _get_patient_context(request.patient_id)
+            ctx = _get_patient_context(request.ris_exam_id)  # 修改为ris_exam_id
             if ctx.get("name"):
                 refined_payload["name"] = ctx["name"]
 
         # Timestamp for refined save (tz-aware)
         refined_time = datetime.datetime.now().astimezone().isoformat()
         refined_payload["refinedTime"] = refined_time
-        refined_payload["_exam_patient_id"] = request.patient_id
+        refined_payload["_exam_ris_exam_id"] = request.ris_exam_id  # 修改字段名
 
         # Locate original questionnaire item by name + examineTime alignment
-        ctx = _get_patient_context(request.patient_id)
+        ctx = _get_patient_context(request.ris_exam_id)  # 修改为ris_exam_id
         idx = _find_best_matching_index(all_consultations, ctx.get("name"), ctx.get("examineTime"))
 
         if idx is not None:
@@ -1092,8 +1197,8 @@ def _fallback_ai_summary(patient: Optional[PatientData], eye_key: str) -> str:
         logger.error(f"Fallback AI summary failed: {e}")
         return f"获取预测数据失败: {str(e)}"
 
-def _build_context_placeholders(patient_id: Optional[str]) -> Dict[str, str]:
-    p: Optional[PatientData] = patients_data_cache.get(patient_id or "")
+def _build_context_placeholders(ris_exam_id: Optional[str]) -> Dict[str, str]:
+    p: Optional[PatientData] = patients_data_cache.get(ris_exam_id or "")
     
     # 从患者数据中获取基本信息
     name = getattr(p, "name", None) if p else None
@@ -1106,8 +1211,8 @@ def _build_context_placeholders(patient_id: Optional[str]) -> Dict[str, str]:
         try:
             with open(RAW_JSON_PATH, 'r', encoding='utf-8') as f:
                 raw_data = json.load(f)
-                if patient_id and patient_id in raw_data:
-                    patient_info = raw_data[patient_id]
+                if ris_exam_id and ris_exam_id in raw_data:
+                    patient_info = raw_data[ris_exam_id]
                     if not age and "age" in patient_info:
                         age = patient_info["age"]
                     if not gender and "gender" in patient_info:
@@ -1122,7 +1227,7 @@ def _build_context_placeholders(patient_id: Optional[str]) -> Dict[str, str]:
     # 从问诊数据中获取年龄和性别信息（优先级更高，因为这是用户填写的最新信息）
     with consultation_data_lock:
         cons_all = load_consultation_data()
-        ctx = _get_patient_context(patient_id or "")
+        ctx = _get_patient_context(ris_exam_id or "")
         idx = _find_best_matching_index(cons_all, ctx.get("name") or name, ctx.get("examineTime") or examine_time)
         cons = None
         
@@ -1151,7 +1256,7 @@ def _build_context_placeholders(patient_id: Optional[str]) -> Dict[str, str]:
     ai_left_summary = _summarize_ai_detailed(p, "left_eye")
     ai_right_summary = _summarize_ai_detailed(p, "right_eye")
     threshold_summary = _summarize_thresholds(p)
-    manual_summary = _summarize_manual(patient_id or "")
+    manual_summary = _summarize_manual(ris_exam_id or "")
 
     return {
         "patient_name": name or "患者",
@@ -1360,8 +1465,9 @@ async def llm_chat_stream(req: LLMChatRequest):
     else:
         # 对于后续对话，也使用user方式传递上下文信息
         context_text = ""
+        # 构建上下文信息时使用ris_exam_id
         if cfg.get("include_patient_context", True):
-            placeholders = _build_context_placeholders(req.patient_id)
+            placeholders = _build_context_placeholders(req.patient_id)  # 这里req.patient_id实际上是ris_exam_id
             context_text = _fill_template(cfg.get("context_template", ""), placeholders)
         
         # 构建包含上下文的user消息作为第一条消息

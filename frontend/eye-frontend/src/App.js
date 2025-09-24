@@ -497,6 +497,21 @@ function App() {
   const sideChatScrollRef = useRef(null);
   const [autoScrollChat, setAutoScrollChat] = useState(true);
 
+  // Add state for consultation info
+  const [consultationData, setConsultationData] = useState(null);
+  const [consultationDataEdited, setConsultationDataEdited] = useState(null);
+  const [isConsultationSubmitting, setIsConsultationSubmitting] = useState(false);
+  const [consultationSubmitMessage, setConsultationSubmitMessage] = useState('');
+  
+  // 添加缺失的状态变量
+  const [currentPatientId, setCurrentPatientId] = useState('');
+  const [patientNameSearch, setPatientNameSearch] = useState('');
+  const [availablePatientNames, setAvailablePatientNames] = useState([]);
+  const [showNameSuggestions, setShowNameSuggestions] = useState(false);
+  const [sameNameConsultations, setSameNameConsultations] = useState([]);
+  const [showConsultationSelector, setShowConsultationSelector] = useState(false);
+  const [consultationLoading, setConsultationLoading] = useState(false);
+
   // Build backend URL and patient id
   const backendHost = window.location.hostname;
   const backendUrl = `http://${backendHost}:8000`;
@@ -510,6 +525,180 @@ function App() {
 
   const [llmConfig, setLlmConfig] = useState({ update_prompt: '' });
 
+
+    // 添加：获取所有可用患者姓名
+  const fetchAvailablePatientNames = useCallback(async () => {
+    try {
+      const res = await fetch(`${backendUrl}/api/consultation/names`, { cache: 'no-store' });
+      const data = await res.json();
+      setAvailablePatientNames(Array.isArray(data.patient_names) ? data.patient_names : []);
+    } catch (e) {
+      console.warn('Failed to fetch patient names:', e);
+    }
+  }, [backendUrl]);
+
+  // 添加：根据 ris_exam_id（可选 patient_name）获取问诊信息，并初始化可编辑副本
+  const fetchConsultationInfo = useCallback(async (risExamId, searchName = null, autoPickLatestIfMultiple = false) => {
+    if (!risExamId) return;
+    setConsultationLoading(true);
+    try {
+      const url = searchName
+        ? `${backendUrl}/api/consultation/${encodeURIComponent(risExamId)}?patient_name=${encodeURIComponent(searchName)}`
+        : `${backendUrl}/api/consultation/${encodeURIComponent(risExamId)}`;
+      const res = await fetch(url, { cache: 'no-store' });
+      const data = await res.json();
+
+      if (data.status === 'multiple_matches') {
+        const candidates = Array.isArray(data.same_name_consultations) ? [...data.same_name_consultations] : [];
+
+        if (autoPickLatestIfMultiple && candidates.length > 0) {
+          // 选最新：按提交时间倒序
+          candidates.sort((a, b) => {
+            const ta = a?.submissionTime ? new Date(a.submissionTime).getTime() : 0;
+            const tb = b?.submissionTime ? new Date(b.submissionTime).getTime() : 0;
+            return tb - ta;
+          });
+          const first = candidates[0];
+
+          // 直接获取该索引的问诊详情（避免依赖组件内其他函数，减少TDZ风险）
+          try {
+            const byIdxUrl = `${backendUrl}/api/consultation/${encodeURIComponent(risExamId)}/by_index/${first.index}?use_refined=${!!first.isRefined}`;
+            const r = await fetch(byIdxUrl, { cache: 'no-store' });
+            const picked = await r.json();
+            if (picked.status === 'success_refined' || picked.status === 'success_original') {
+              setConsultationData(picked.consultation_data || null);
+              setConsultationDataEdited(picked.consultation_data ? JSON.parse(JSON.stringify(picked.consultation_data)) : null);
+              setShowConsultationSelector(false);
+              setSameNameConsultations([]);
+            } else {
+              // 回退到选择器
+              setSameNameConsultations(candidates);
+              setShowConsultationSelector(true);
+              setConsultationData(null);
+              setConsultationDataEdited(null);
+            }
+          } catch {
+            // 回退到选择器
+            setSameNameConsultations(candidates);
+            setShowConsultationSelector(true);
+            setConsultationData(null);
+            setConsultationDataEdited(null);
+          }
+        } else {
+          // 保持原行为：展示同名选择器
+          setSameNameConsultations(candidates);
+          setShowConsultationSelector(true);
+          setConsultationData(null);
+          setConsultationDataEdited(null);
+        }
+      } else if (data.status === 'success_refined' || data.status === 'success_original') {
+        setConsultationData(data.consultation_data || null);
+        setConsultationDataEdited(data.consultation_data ? JSON.parse(JSON.stringify(data.consultation_data)) : null);
+        setShowConsultationSelector(false);
+        setSameNameConsultations([]);
+      } else {
+        setConsultationData(null);
+        setConsultationDataEdited(null);
+        setShowConsultationSelector(false);
+        setSameNameConsultations([]);
+      }
+    } catch (e) {
+      console.error('Failed to fetch consultation info:', e);
+      setConsultationData(null);
+      setConsultationDataEdited(null);
+    } finally {
+      setConsultationLoading(false);
+    }
+  }, [backendUrl]);
+
+  // 添加：姓名输入/选择逻辑
+  const handlePatientNameSearch = useCallback((val) => {
+    setPatientNameSearch(val);
+    setShowNameSuggestions(!!val && availablePatientNames.some(n => n.includes(val)));
+  }, [availablePatientNames]);
+
+  const selectPatientName = useCallback((name) => {
+    setPatientNameSearch(name);
+    setShowNameSuggestions(false);
+    if (currentPatientId) {
+      fetchConsultationInfo(currentPatientId, name);
+    }
+  }, [currentPatientId, fetchConsultationInfo]);
+
+  // 首次加载：取可用姓名列表
+  useEffect(() => {
+    fetchAvailablePatientNames();
+  }, [fetchAvailablePatientNames]);
+
+  // 已有：根据 URL 初始化 ris_exam_id 与按姓名检索
+  useEffect(() => {
+    const urlParams = new URLSearchParams(window.location.search);
+    const risExamIdFromUrl = urlParams.get('ris_exam_id');
+    const patientNameFromUrl = urlParams.get('patient_name');
+
+    if (risExamIdFromUrl) {
+      setCurrentPatientId(risExamIdFromUrl);
+      if (patientNameFromUrl) {
+        const decoded = decodeURIComponent(patientNameFromUrl);
+        setPatientNameSearch(decoded);
+        fetchConsultationInfo(risExamIdFromUrl, decoded, true); // 同名多条时自动选最新
+      } else {
+        fetchConsultationInfo(risExamIdFromUrl);
+      }
+      fetchPatientData(risExamIdFromUrl);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // 修正：根据索引选择特定问诊记录（使用 backendUrl，并同步可编辑副本）
+  const selectConsultationByIndex = async (index, useRefined = true) => {
+    try {
+      const response = await fetch(`${backendUrl}/api/consultation/${currentPatientId}/by_index/${index}?use_refined=${useRefined}`);
+      const data = await response.json();
+
+      if (data.status === 'success_refined' || data.status === 'success_original') {
+        setConsultationData(data.consultation_data);
+        setConsultationDataEdited(data.consultation_data ? JSON.parse(JSON.stringify(data.consultation_data)) : null);
+        setShowConsultationSelector(false);
+        setSameNameConsultations([]);
+      }
+    } catch (error) {
+      console.error('Failed to fetch consultation by index:', error);
+    }
+  };
+
+  // 修正：保存问诊时同时传 patient_id 与 ris_exam_id 以兼容后端两种模型
+  const handleConsultationSubmit = useCallback(async () => {
+    if (!consultationDataEdited || !currentExamId) return;
+
+    setIsConsultationSubmitting(true);
+    setConsultationSubmitMessage('');
+
+    try {
+      const response = await fetch(`${backendUrl}/api/consultation`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          patient_id: currentExamId,     // 兼容旧后端
+          ris_exam_id: currentExamId,    // 兼容新后端
+          consultation_data: consultationDataEdited
+        }),
+      });
+
+      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+
+      const result = await response.json();
+      setConsultationSubmitMessage(result.status || 'Consultation data saved!');
+      setConsultationData(consultationDataEdited);
+    } catch (e) {
+      console.error("Failed to submit consultation data:", e);
+      setConsultationSubmitMessage(`Error: ${e.message}`);
+    } finally {
+      setIsConsultationSubmitting(false);
+      setTimeout(() => setConsultationSubmitMessage(''), 3000);
+    }
+  }, [backendUrl, currentExamId, consultationDataEdited]);
+
   // Load LLM prompts config (update_prompt)
   useEffect(() => {
     (async () => {
@@ -522,34 +711,50 @@ function App() {
   }, [backendUrl]);
 
   // Load persisted LLM chat history when patient changes
+  // 若对话为空，则自动开始“更新最新结果”
   useEffect(() => {
     const pid = getCurrentPatientId();
     if (!pid) return;
-    let aborted = false;
 
-    (async () => {
-      try {
-        const res = await fetch(`${backendUrl}/api/llm_context/${pid}`, { cache: 'no-store' });
-        if (!res.ok) return;
-        const data = await res.json();
-        if (aborted) return;
-        const hist = Array.isArray(data?.llm_context?.history) ? data.llm_context.history : [];
-        // keep only well-formed turns
-        const normalized = hist.filter(m => m && typeof m.role === 'string' && typeof m.content === 'string');
-        setSideChatMessages(normalized);
-        // snap to bottom
-        requestAnimationFrame(() => {
-          const el = sideChatScrollRef.current;
-          if (el) {
-            el.scrollTop = el.scrollHeight;
-            setAutoScrollChat(true);
-          }
-        });
-      } catch {}
-    })();
+    // 已触发过则不再重复
+    if (autoStartRef.current[pid]) return;
 
-    return () => { aborted = true; };
-  }, [backendUrl, getCurrentPatientId]);
+    // 条件：有患者数据，未在生成中，对话为空
+    if (patientData && !llmLoading && sideChatMessages.length === 0) {
+      autoStartRef.current[pid] = true;
+      regenerateSideOpinion(); // 开始流式生成
+    }
+    // 仅监听必要的状态，避免依赖未初始化的 const
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [patientData, llmLoading, sideChatMessages.length, getCurrentPatientId]);
+  // useEffect(() => {
+  //   const pid = getCurrentPatientId();
+  //   if (!pid) return;
+  //   let aborted = false;
+
+  //   (async () => {
+  //     try {
+  //       const res = await fetch(`${backendUrl}/api/llm_context/${pid}`, { cache: 'no-store' });
+  //       if (!res.ok) return;
+  //       const data = await res.json();
+  //       if (aborted) return;
+  //       const hist = Array.isArray(data?.llm_context?.history) ? data.llm_context.history : [];
+  //       // keep only well-formed turns
+  //       const normalized = hist.filter(m => m && typeof m.role === 'string' && typeof m.content === 'string');
+  //       setSideChatMessages(normalized);
+  //       // snap to bottom
+  //       requestAnimationFrame(() => {
+  //         const el = sideChatScrollRef.current;
+  //         if (el) {
+  //           el.scrollTop = el.scrollHeight;
+  //           setAutoScrollChat(true);
+  //         }
+  //       });
+  //     } catch {}
+  //   })();
+
+  //   return () => { aborted = true; };
+  // }, [backendUrl, getCurrentPatientId]);
 
   // Chat scroll handling (only autoscroll if user is at bottom)
   useEffect(() => {
@@ -565,6 +770,8 @@ function App() {
     const atBottom = (el.scrollHeight - el.scrollTop - el.clientHeight) <= threshold;
     setAutoScrollChat(atBottom);
   };
+
+  const autoStartRef = useRef({});
 
   // Streaming send with persistence flags
   const sendSideChatStreaming = async (text, opts = {}) => {
@@ -1143,16 +1350,6 @@ function App() {
     }
   }, [backendUrl]);
 
-  // Fetch data on component mount or when examId changes
-  useEffect(() => {
-    if (currentExamId) {
-      fetchPatientData(currentExamId);
-    } else {
-      setError('No ris_exam_id provided in URL. Please add ?ris_exam_id=<exam_id> to the URL.');
-      setLoading(false);
-    }
-  }, [currentExamId, fetchPatientData]);
-
   // Handler for changes to Image Type or Image Quality dropdowns
   const handleImageDetailChange = (imageId, field, value) => {
     setPatientData(prevData => {
@@ -1334,43 +1531,22 @@ function App() {
     }
   };
 
-  // Add state for consultation info
-  const [consultationData, setConsultationData] = useState(null);
-  const [consultationDataEdited, setConsultationDataEdited] = useState(null);
-  const [isConsultationSubmitting, setIsConsultationSubmitting] = useState(false);
-  const [consultationSubmitMessage, setConsultationSubmitMessage] = useState('');
-  
-  // Fetch consultation data
-  const fetchConsultationData = useCallback(async (patientId) => {
-    if (!patientId) return;
-    
-    try {
-      const response = await fetch(`${backendUrl}/api/consultation/${patientId}`);
-      if (!response.ok) {
-        console.warn(`Failed to fetch consultation data: ${response.status}`);
-        return;
-      }
+  // // 根据索引选择特定问诊记录
+  // const selectConsultationByIndex = async (index, useRefined = true) => {
+  //   try {
+  //     const response = await fetch(`/api/consultation/${currentPatientId}/by_index/${index}?use_refined=${useRefined}`);
+  //     const data = await response.json();
       
-      const data = await response.json();
-      if (data.consultation_data) {
-        setConsultationData(data.consultation_data);
-        setConsultationDataEdited(JSON.parse(JSON.stringify(data.consultation_data)));
-      }
-    } catch (e) {
-      console.error("Error fetching consultation data:", e);
-    }
-  }, [backendUrl]);
+  //     if (data.status === 'success_refined' || data.status === 'success_original') {
+  //       setConsultationData(data.consultation_data);
+  //       setShowConsultationSelector(false);
+  //       setSameNameConsultations([]);
+  //     }
+  //   } catch (error) {
+  //     console.error('Failed to fetch consultation by index:', error);
+  //   }
+  // };
   
-  // Fetch patient data and consultation data
-  useEffect(() => {
-    if (currentExamId) {
-      fetchPatientData(currentExamId);
-      fetchConsultationData(currentExamId);
-    } else {
-      setError('No ris_exam_id provided in URL. Please add ?ris_exam_id=<exam_id> to the URL.');
-      setLoading(false);
-    }
-  }, [currentExamId, fetchPatientData, fetchConsultationData]);
   
   // Handle consultation data changes
   const handleConsultationChange = useCallback((newData) => {
@@ -1378,40 +1554,40 @@ function App() {
   }, []);
   
   // Submit consultation changes
-  const handleConsultationSubmit = useCallback(async () => {
-    if (!consultationDataEdited || !currentExamId) return;
+  // const handleConsultationSubmit = useCallback(async () => {
+  //   if (!consultationDataEdited || !currentExamId) return;
     
-    setIsConsultationSubmitting(true);
-    setConsultationSubmitMessage('');
+  //   setIsConsultationSubmitting(true);
+  //   setConsultationSubmitMessage('');
     
-    try {
-      const response = await fetch(`${backendUrl}/api/consultation`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          patient_id: currentExamId,
-          consultation_data: consultationDataEdited
-        }),
-      });
+  //   try {
+  //     const response = await fetch(`${backendUrl}/api/consultation`, {
+  //       method: 'POST',
+  //       headers: {
+  //         'Content-Type': 'application/json',
+  //       },
+  //       body: JSON.stringify({
+  //         patient_id: currentExamId,
+  //         consultation_data: consultationDataEdited
+  //       }),
+  //     });
       
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
+  //     if (!response.ok) {
+  //       throw new Error(`HTTP error! status: ${response.status}`);
+  //     }
       
-      const result = await response.json();
-      setConsultationSubmitMessage(result.status || 'Consultation data saved!');
-      setConsultationData(consultationDataEdited); // Update the original data
+  //     const result = await response.json();
+  //     setConsultationSubmitMessage(result.status || 'Consultation data saved!');
+  //     setConsultationData(consultationDataEdited); // Update the original data
       
-    } catch (e) {
-      console.error("Failed to submit consultation data:", e);
-      setConsultationSubmitMessage(`Error: ${e.message}`);
-    } finally {
-      setIsConsultationSubmitting(false);
-      setTimeout(() => setConsultationSubmitMessage(''), 3000);
-    }
-  }, [backendUrl, currentExamId, consultationDataEdited]);
+  //   } catch (e) {
+  //     console.error("Failed to submit consultation data:", e);
+  //     setConsultationSubmitMessage(`Error: ${e.message}`);
+  //   } finally {
+  //     setIsConsultationSubmitting(false);
+  //     setTimeout(() => setConsultationSubmitMessage(''), 3000);
+  //   }
+  // }, [backendUrl, currentExamId, consultationDataEdited]);
   
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-100 to-purple-100 p-6 font-inter text-gray-800 antialiased">
@@ -1493,18 +1669,67 @@ function App() {
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-10 items-stretch">
               {/* Left column: Consultation Info */}
               <div className="lg:col-span-1 h-full">
-                <ConsultationInfoSection 
-                  consultationData={consultationDataEdited}
-                  onChange={handleConsultationChange}
-                  onSubmit={handleConsultationSubmit}
-                  isSubmitting={isConsultationSubmitting}
-                />
-                {consultationSubmitMessage && (
-                  <div className="mt-2 text-center">
-                    <p className="text-green-600 text-sm">{consultationSubmitMessage}</p>
+              {/* 患者姓名搜索（可选） */}
+              <div className="mb-4 p-4 bg-blue-50 rounded-lg border border-blue-200">
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  按患者姓名搜索问诊信息
+                </label>
+                <div className="relative">
+                  <input
+                    type="text"
+                    value={patientNameSearch}
+                    onChange={(e) => handlePatientNameSearch(e.target.value)}
+                    onFocus={() => patientNameSearch && setShowNameSuggestions(true)}
+                    placeholder="输入患者姓名..."
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                  {showNameSuggestions && (
+                    <div className="absolute z-10 w-full mt-1 bg-white border border-gray-300 rounded-md shadow-lg max-h-60 overflow-y-auto">
+                      {availablePatientNames
+                        .filter(name => name.includes(patientNameSearch))
+                        .map((name, idx) => (
+                          <div
+                            key={idx}
+                            onClick={() => selectPatientName(name)}
+                            className="px-3 py-2 cursor-pointer hover:bg-blue-50 border-b border-gray-100 last:border-b-0"
+                          >
+                            {name}
+                          </div>
+                        ))}
+                    </div>
+                  )}
+                </div>
+                {patientNameSearch && (
+                  <div className="mt-2 flex space-x-2">
+                    <button
+                      onClick={() => fetchConsultationInfo(currentPatientId, patientNameSearch)}
+                      className="px-3 py-1 bg-blue-600 text-white rounded text-sm hover:bg-blue-700"
+                    >
+                      搜索
+                    </button>
+                    <button
+                      onClick={() => { setPatientNameSearch(''); fetchConsultationInfo(currentPatientId); }}
+                      className="px-3 py-1 bg-gray-600 text-white rounded text-sm hover:bg-gray-700"
+                    >
+                      重置
+                    </button>
                   </div>
                 )}
               </div>
+
+              {/* 原有问诊信息表单 */}
+              <ConsultationInfoSection 
+                consultationData={consultationDataEdited}
+                onChange={handleConsultationChange}
+                onSubmit={handleConsultationSubmit}
+                isSubmitting={isConsultationSubmitting}
+              />
+              {consultationSubmitMessage && (
+                <div className="mt-2 text-center">
+                  <p className="text-green-600 text-sm">{consultationSubmitMessage}</p>
+                </div>
+              )}
+            </div>
               
               {/* Right column: Images */}
               <div className="lg:col-span-2 h-full">
@@ -1620,7 +1845,7 @@ function App() {
                                       <span
                                         key={o.key}
                                         className="px-2.5 py-1 rounded-full bg-amber-400/10 text-amber-700 text-xs border border-amber-300/40 opacity-85"
-                                      >
+                                     >
                                         {o.name}
                                       </span>
                                     ))}
@@ -1968,6 +2193,59 @@ function App() {
             </div>
           </div>
         )}
+        {showConsultationSelector && sameNameConsultations.length > 0 && (
+  <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+    <div className="bg-white rounded-lg max-w-4xl w-full max-h-[90vh] overflow-y-auto">
+      <div className="p-6">
+        <div className="flex justify-between items-center mb-4">
+          <h2 className="text-xl font-bold text-gray-900">
+            选择问诊记录 - {sameNameConsultations[0]?.name || ''}
+          </h2>
+          <button
+            onClick={() => setShowConsultationSelector(false)}
+            className="text-gray-400 hover:text-gray-600 text-2xl font-bold"
+          >
+            ×
+          </button>
+        </div>
+
+        <div className="space-y-3">
+          {sameNameConsultations.map((c, idx) => (
+            <div
+              key={idx}
+              className="border border-gray-200 rounded-lg p-4 hover:bg-gray-50 cursor-pointer"
+              onClick={() => selectConsultationByIndex(c.index, c.isRefined)}
+            >
+              <div className="flex justify-between items-start">
+                <div className="flex-1">
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+                    <div><span className="font-medium text-gray-600">年龄：</span><span className="text-gray-900">{c.age || '-'}</span></div>
+                    <div><span className="font-medium text-gray-600">性别：</span><span className="text-gray-900">{c.gender || '-'}</span></div>
+                    <div><span className="font-medium text-gray-600">电话：</span><span className="text-gray-900">{c.phone || '-'}</span></div>
+                    <div><span className="font-medium text-gray-600">提交时间：</span><span className="text-gray-900">{c.submissionTime ? new Date(c.submissionTime).toLocaleString('zh-CN') : '-'}</span></div>
+                  </div>
+                </div>
+                <div className="ml-4 flex flex-col items-end space-y-1">
+                  {c.isRefined && <span className="px-2 py-1 bg-green-100 text-green-800 text-xs rounded">修订后</span>}
+                  {c.hasRefined && !c.isRefined && <span className="px-2 py-1 bg-blue-100 text-blue-800 text-xs rounded">原始版本</span>}
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div className="mt-6 flex justify-end">
+          <button
+            onClick={() => setShowConsultationSelector(false)}
+            className="px-4 py-2 bg-gray-600 text-white rounded hover:bg-gray-700"
+          >
+            取消
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+)}
       </main>
 
       {/* Disclaimer */}
