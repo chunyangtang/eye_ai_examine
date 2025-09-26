@@ -1,15 +1,19 @@
 import io
 import json
 import random
+import os
 from base64 import b64encode
 from typing import List, Dict, Any, Optional
 import time
-import os
 
 from PIL import Image, ImageDraw, ImageFont
 from tqdm import tqdm
+from dotenv import load_dotenv
 
 from datatype import PatientData, ImageInfo, EyePrediction, EyePredictionThresholds, EyeDiagnosis, CATARACT_EXTERNAL_THRESHOLD
+
+# Load environment variables
+load_dotenv()
 
 
 def _parse_ts_from_path(p: str) -> int:
@@ -203,11 +207,17 @@ def load_single_patient_data(data_path: str, patient_id: str) -> PatientData:
         active_threshold_set=0  # Default to threshold set 1
     )
 
-def load_batch_patient_data(data_path="../data/inference_results.json") -> List[PatientData]:
+def load_batch_patient_data(data_path=None) -> List[PatientData]:
     """
     Load and parse a batch of patient data from a JSON file.
     Returns a list of PatientData objects.
     """
+    if data_path is None:
+        data_path_env = os.getenv("RAW_JSON_PATH", "../data/inference_results.json")
+        if not os.path.isabs(data_path_env):
+            data_path = os.path.normpath(os.path.join(os.path.dirname(__file__), data_path_env))
+        else:
+            data_path = data_path_env
     default_image_quality = ""
     diagnosis_mapping = {
         "青光眼": "青光眼",

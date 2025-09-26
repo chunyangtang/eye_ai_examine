@@ -45,15 +45,36 @@ manual_diagnosis_storage: Dict[str, ManualDiagnosisData] = {}
 # Cache of raw per-image probabilities to avoid disk I/O on reselection
 raw_probs_cache: Dict[str, Dict[str, Any]] = {}
 
-RAW_JSON_PATH = "../data/inference_results.json"
+# Get data paths from environment variables
+RAW_JSON_PATH_ENV = os.getenv("RAW_JSON_PATH", "../data/inference_results.json")
+if not os.path.isabs(RAW_JSON_PATH_ENV):
+    RAW_JSON_PATH = os.path.normpath(os.path.join(os.path.dirname(__file__), RAW_JSON_PATH_ENV))
+else:
+    RAW_JSON_PATH = RAW_JSON_PATH_ENV
 
-EXAMINE_RESULTS_PATH = "../data/examine_results.json"
+EXAMINE_RESULTS_PATH_ENV = os.getenv("EXAMINE_RESULTS_PATH", "../data/examine_results.json")
+if not os.path.isabs(EXAMINE_RESULTS_PATH_ENV):
+    EXAMINE_RESULTS_PATH = os.path.normpath(os.path.join(os.path.dirname(__file__), EXAMINE_RESULTS_PATH_ENV))
+else:
+    EXAMINE_RESULTS_PATH = EXAMINE_RESULTS_PATH_ENV
+
 INFERENCE_RESULTS_PATH = EXAMINE_RESULTS_PATH
 
 # Path to questionnaire data from the other project
-CONSULTATION_DATA_PATH = os.path.normpath(
-    os.path.join(os.path.dirname(__file__), "../../eye_ai_consultation/data/questionnaire_data.json")
-)
+CONSULTATION_DATA_PATH_ENV = os.getenv("CONSULTATION_DATA_PATH")
+if CONSULTATION_DATA_PATH_ENV:
+    # If path is relative, make it relative to the backend directory
+    if not os.path.isabs(CONSULTATION_DATA_PATH_ENV):
+        CONSULTATION_DATA_PATH = os.path.normpath(
+            os.path.join(os.path.dirname(__file__), CONSULTATION_DATA_PATH_ENV)
+        )
+    else:
+        CONSULTATION_DATA_PATH = CONSULTATION_DATA_PATH_ENV
+else:
+    # Default path
+    CONSULTATION_DATA_PATH = os.path.normpath(
+        os.path.join(os.path.dirname(__file__), "../../eye_ai_consultation/data/questionnaire_data.json")
+    )
 
 # Lock for thread-safe access to cached data
 patient_data_lock = threading.Lock()
@@ -919,10 +940,11 @@ async def save_consultation_info(request: SaveConsultationRequest):
 
 
 # --- LLM prompts config (provider/base/model stay in .env) ---
-LLM_PROMPTS_PATH = os.getenv(
-    "LLM_PROMPTS_PATH",
-    os.path.join(os.path.dirname(__file__), "config", "llm_prompts.json")
-)
+LLM_PROMPTS_PATH_ENV = os.getenv("LLM_PROMPTS_PATH", "config/llm_prompts.json")
+if not os.path.isabs(LLM_PROMPTS_PATH_ENV):
+    LLM_PROMPTS_PATH = os.path.join(os.path.dirname(__file__), LLM_PROMPTS_PATH_ENV)
+else:
+    LLM_PROMPTS_PATH = LLM_PROMPTS_PATH_ENV
 
 def load_llm_prompts() -> Dict[str, Any]:
     defaults = {
