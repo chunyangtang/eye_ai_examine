@@ -2,7 +2,7 @@ import io
 import json
 import random
 from base64 import b64encode
-from typing import List
+from typing import List, Dict, Any, Optional
 import time
 import os
 
@@ -20,30 +20,58 @@ def _parse_ts_from_path(p: str) -> int:
     try:
         base = os.path.basename(p)
         name, _ = os.path.splitext(base)
-        # pick the last underscore segment if any
+        # 先尝试取最后一段
         parts = name.split('_')
         cand = parts[-1] if parts else name
-        # keep only digits
         digits = ''.join(ch for ch in cand if ch.isdigit())
-        return int(digits) if digits else 0
+        if digits:
+            return int(digits)
+        # 回退：全名里收集所有数字
+        digits_all = ''.join(ch for ch in name if ch.isdigit())
+        return int(digits_all) if digits_all else 0
     except Exception:
         return 0
 
 
-def _pick_latest_by_type(images_json_list, image_type_mapping, desired_type: str):
-    """From raw JSON images, pick the one with mapped type == desired_type and latest timestamp from img_path.
-    Return the raw image dict or None.
+def _map_eye_class_to_type(eye_cls: str) -> Optional[str]:
+    """Map RAW v2 eye_classification.class to internal types."""
+    cls = (eye_cls or "").strip().lower()
+    if cls == "left fundus":
+        return "左眼CFP"
+    if cls == "right fundus":
+        return "右眼CFP"
+    if cls == "left outer eye":
+        return "左眼外眼照"
+    if cls == "right outer eye":
+        return "右眼外眼照"
+    return None
+
+
+def _extract_diseases_from_img(img: Dict[str, Any]) -> Dict[str, float]:
+    """Extract diseases probs from fundus_classification.diseases."""
+    try:
+        diseases = img.get("fundus_classification", {}).get("diseases", {})
+        if isinstance(diseases, dict):
+            return {str(k): float(v) for k, v in diseases.items() if isinstance(v, (int, float))}
+    except Exception:
+        pass
+    return {}
+
+
+def _pick_latest_by_type(images_json_list: List[Dict[str, Any]], desired_type: str):
     """
-    candidates = [
-        im for im in images_json_list
-        if image_type_mapping.get(im.get("eye", ""), "") == desired_type
-    ]
+    From RAW v2 images, pick the one with mapped type == desired_type and latest timestamp by img_path.
+    """
+    candidates = []
+    for im in images_json_list or []:
+        eye_cls = (im.get("eye_classification", {}) or {}).get("class", "")
+        mapped = _map_eye_class_to_type(eye_cls)
+        if mapped == desired_type:
+            candidates.append(im)
     if not candidates:
         return None
     candidates.sort(key=lambda im: _parse_ts_from_path(im.get("img_path", "")), reverse=True)
     return candidates[0]
-
-
 
 
 def read_image(image_path):
@@ -68,12 +96,6 @@ def load_single_patient_data(data_path: str, patient_id: str) -> PatientData:
     Returns a PatientData object or raises KeyError if not found.
     Optimized to only process the requested patient's data.
     """
-    image_type_mapping = {
-        "右眼眼底": "右眼CFP",
-        "左眼眼底": "左眼CFP",
-        "右眼外观": "右眼外眼照",
-        "左眼外观": "左眼外眼照",
-    }
     default_image_quality = ""
     diagnosis_mapping = {
         "青光眼": "青光眼",
@@ -88,7 +110,7 @@ def load_single_patient_data(data_path: str, patient_id: str) -> PatientData:
         "白内障": "白内障",
         "正常": "正常"
     }
-    prediction_thresholds = EyePredictionThresholds()
+    prediction_thresholds = EyePredictionThresholds.get_threshold_set_1()  # Default to set 1
 
     # Load only the JSON data first
     with open(data_path, "r", encoding="utf-8") as f:
@@ -107,11 +129,16 @@ def load_single_patient_data(data_path: str, patient_id: str) -> PatientData:
     # Process only this patient's images
     eye_images = []
     for img in pdata.get("images", []):
-        img_type = image_type_mapping.get(img.get("eye", ""), "")
+        eye_cls = (img.get("eye_classification", {}) or {}).get("class", "")
+        img_type = _map_eye_class_to_type(eye_cls) or ""
         img_quality = default_image_quality
-        prefix = os.path.dirname(data_path)
         img_rel = img.get("img_path", "")
-        full_path = os.path.join(prefix, img_rel)
+        # 兼容绝对/相对路径
+        if os.path.isabs(img_rel):
+            full_path = img_rel
+        else:
+            prefix = os.path.dirname(data_path)
+            full_path = os.path.join(prefix, img_rel)
         base64_data = read_image(full_path)
         eye_images.append(ImageInfo(
             id=f"img_{patient_id}_{img.get('img_path', '')}",
@@ -126,17 +153,20 @@ def load_single_patient_data(data_path: str, patient_id: str) -> PatientData:
     for eye in ["left_eye", "right_eye"]:
         cfp_type = "左眼CFP" if eye == "left_eye" else "右眼CFP"
         ext_type = "左眼外眼照" if eye == "left_eye" else "右眼外眼照"
-        cfp_img = _pick_latest_by_type(pdata.get("images", []), image_type_mapping, cfp_type)
-        ext_img = _pick_latest_by_type(pdata.get("images", []), image_type_mapping, ext_type)
+        cfp_img = _pick_latest_by_type(pdata.get("images", []), cfp_type)
+        ext_img = _pick_latest_by_type(pdata.get("images", []), ext_type)
 
-        if cfp_img and cfp_img.get("probs"):
-            cfp_probs = {diagnosis_mapping.get(k, k): v for k, v in cfp_img.get("probs", {}).items()}
+        if cfp_img:
+            cfp_probs_raw = _extract_diseases_from_img(cfp_img)
+            cfp_probs = {diagnosis_mapping.get(k, k): v for k, v in cfp_probs_raw.items()}
         else:
             cfp_probs = {disease: 0.0 for disease in diagnosis_mapping.values()}
 
         ext_probs = None
-        if ext_img and ext_img.get("probs"):
-            ext_probs = {diagnosis_mapping.get(k, k): v for k, v in ext_img.get("probs", {}).items()}
+        if ext_img:
+            ext_probs_raw = _extract_diseases_from_img(ext_img)
+            if ext_probs_raw:
+                ext_probs = {diagnosis_mapping.get(k, k): v for k, v in ext_probs_raw.items()}
 
         probs = dict(cfp_probs)
         if ext_probs is not None and "白内障" in ext_probs:
@@ -169,7 +199,8 @@ def load_single_patient_data(data_path: str, patient_id: str) -> PatientData:
         eye_images=eye_images,
         prediction_results=prediction_results,
         prediction_thresholds=prediction_thresholds,
-        diagnosis_results=diagnosis_results
+        diagnosis_results=diagnosis_results,
+        active_threshold_set=0  # Default to threshold set 1
     )
 
 def load_batch_patient_data(data_path="../data/inference_results.json") -> List[PatientData]:
@@ -177,12 +208,6 @@ def load_batch_patient_data(data_path="../data/inference_results.json") -> List[
     Load and parse a batch of patient data from a JSON file.
     Returns a list of PatientData objects.
     """
-    image_type_mapping = {
-        "右眼眼底": "右眼CFP",
-        "左眼眼底": "左眼CFP",
-        "右眼外观": "右眼外眼照",
-        "左眼外观": "左眼外眼照",
-    }
     default_image_quality = ""
     diagnosis_mapping = {
         "青光眼": "青光眼",
@@ -208,15 +233,20 @@ def load_batch_patient_data(data_path="../data/inference_results.json") -> List[
         name = pdata.get("name")
         examine_time = pdata.get("examineTime")
         
-        prediction_thresholds = EyePredictionThresholds()
+        prediction_thresholds = EyePredictionThresholds.get_threshold_set_1()  # Default to set 1
         # Images
         eye_images = []
         for img in pdata.get("images", []):
-            img_type = image_type_mapping.get(img.get("eye", ""), "")
+            eye_cls = (img.get("eye_classification", {}) or {}).get("class", "")
+            img_type = _map_eye_class_to_type(eye_cls) or ""
             img_quality = default_image_quality
-            prefix = os.path.dirname(data_path)
             img_rel = img.get("img_path", "")
-            full_path = os.path.join(prefix, img_rel)
+            # 兼容绝对/相对路径
+            if os.path.isabs(img_rel):
+                full_path = img_rel
+            else:
+                prefix = os.path.dirname(data_path)
+                full_path = os.path.join(prefix, img_rel)
             base64_data = read_image(full_path)
             eye_images.append(ImageInfo(
                 id=f"img_{pid}_{img.get('img_path', '')}",
@@ -233,19 +263,22 @@ def load_batch_patient_data(data_path="../data/inference_results.json") -> List[
             # Find latest CFP and 外眼 images for this eye
             cfp_type = "左眼CFP" if eye == "left_eye" else "右眼CFP"
             ext_type = "左眼外眼照" if eye == "left_eye" else "右眼外眼照"
-            cfp_img = _pick_latest_by_type(pdata.get("images", []), image_type_mapping, cfp_type)
-            ext_img = _pick_latest_by_type(pdata.get("images", []), image_type_mapping, ext_type)
+            cfp_img = _pick_latest_by_type(pdata.get("images", []), cfp_type)
+            ext_img = _pick_latest_by_type(pdata.get("images", []), ext_type)
 
             # Base probabilities from CFP (or zeros if missing)
-            if cfp_img and cfp_img.get("probs"):
-                cfp_probs = {diagnosis_mapping.get(k, k): v for k, v in cfp_img.get("probs", {}).items()}
+            if cfp_img:
+                cfp_probs_raw = _extract_diseases_from_img(cfp_img)
+                cfp_probs = {diagnosis_mapping.get(k, k): v for k, v in cfp_probs_raw.items()}
             else:
                 cfp_probs = {disease: 0.0 for disease in diagnosis_mapping.values()}
 
             # External-eye probabilities (if available)
             ext_probs = None
-            if ext_img and ext_img.get("probs"):
-                ext_probs = {diagnosis_mapping.get(k, k): v for k, v in ext_img.get("probs", {}).items()}
+            if ext_img:
+                ext_probs_raw = _extract_diseases_from_img(ext_img)
+                if ext_probs_raw:
+                    ext_probs = {diagnosis_mapping.get(k, k): v for k, v in ext_probs_raw.items()}
 
             # Start with CFP-based probs
             probs = dict(cfp_probs)
@@ -281,7 +314,8 @@ def load_batch_patient_data(data_path="../data/inference_results.json") -> List[
             eye_images=eye_images,
             prediction_results=prediction_results,
             prediction_thresholds=prediction_thresholds,
-            diagnosis_results=diagnosis_results
+            diagnosis_results=diagnosis_results,
+            active_threshold_set=0  # Default to threshold set 1
         ))
     return patients
 
@@ -334,7 +368,7 @@ def create_single_dummy_patient_data() -> PatientData:
         ))
 
     # --- Prediction Thresholds ---
-    prediction_thresholds = EyePredictionThresholds()
+    prediction_thresholds = EyePredictionThresholds.get_threshold_set_1()  # Default to set 1
 
     # --- Random Predictions ---
     def random_prediction() -> EyePrediction:
@@ -379,7 +413,8 @@ def create_single_dummy_patient_data() -> PatientData:
         eye_images=eye_images,
         prediction_thresholds=prediction_thresholds,
         prediction_results=prediction_results,
-        diagnosis_results=diagnosis_results
+        diagnosis_results=diagnosis_results,
+        active_threshold_set=0  # Default to threshold set 1
     )
 
 def create_batch_dummy_patient_data(num_patients: int = 5) -> List[PatientData]:

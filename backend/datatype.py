@@ -35,6 +35,50 @@ class EyePredictionThresholds(BaseModel):
     其它黄斑病变: float = 0.5
     白内障: float = 0.6
     正常: float = 0.08 # 'Normal'
+    
+    @classmethod
+    def get_threshold_set_1(cls):
+        """First candidate threshold set (optimal F1 scores)"""
+        return cls(
+            青光眼=0.18,      # Class 0
+            糖网=0.23,        # Class 1  
+            AMD=0.18,         # Class 2
+            病理性近视=0.18,   # Class 3
+            RVO=0.18,         # Class 4
+            RAO=0.15,         # Class 5
+            视网膜脱离=0.15,   # Class 6
+            其它视网膜病=0.35,  # Class 7
+            其它黄斑病变=0.50,  # Class 8
+            白内障=0.33,      # Class 9
+            正常=0.38         # Class 10
+        )
+    
+    @classmethod
+    def get_threshold_set_2(cls):
+        """Second candidate threshold set (alternative F1 scores)"""
+        return cls(
+            青光眼=0.20,      # Class 0
+            糖网=0.28,        # Class 1
+            AMD=0.25,         # Class 2
+            病理性近视=0.18,   # Class 3
+            RVO=0.20,         # Class 4
+            RAO=0.18,         # Class 5
+            视网膜脱离=0.18,   # Class 6
+            其它视网膜病=0.25,  # Class 7
+            其它黄斑病变=0.23,  # Class 8
+            白内障=0.28,      # Class 9
+            正常=0.50         # Class 10
+        )
+    
+    @classmethod
+    def get_threshold_set(cls, set_index: int):
+        """Get threshold set by index (0 or 1)"""
+        if set_index == 0:
+            return cls.get_threshold_set_1()
+        elif set_index == 1:
+            return cls.get_threshold_set_2()
+        else:
+            return cls.get_threshold_set_1()  # Default to set 1
 
 
 # Separate threshold for cataract when using external-eye (外眼) predictions
@@ -90,6 +134,7 @@ class PatientData(BaseModel):
     prediction_results: Dict[str, EyePrediction]
     diagnosis_results: Dict[str, EyeDiagnosis]
     prediction_thresholds: EyePredictionThresholds
+    active_threshold_set: int = 0  # 0 for set 1, 1 for set 2
 
 class SubmitDiagnosisRequest(BaseModel):
     patient_id: str
@@ -104,3 +149,6 @@ class UpdateSelectionRequest(BaseModel):
     patient_id: str
     selected_image_ids: List[str]
     
+
+class AlterThresholdRequest(BaseModel):
+    patient_id: str

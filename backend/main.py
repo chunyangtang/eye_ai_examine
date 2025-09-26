@@ -16,7 +16,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
-from datatype import ImageInfo, EyeDiagnosis, PatientData, SubmitDiagnosisRequest, EyePrediction, EyePredictionThresholds, ManualDiagnosisData, UpdateSelectionRequest
+from datatype import ImageInfo, EyeDiagnosis, PatientData, SubmitDiagnosisRequest, EyePrediction, EyePredictionThresholds, ManualDiagnosisData, UpdateSelectionRequest, AlterThresholdRequest
 from patientdataio import load_batch_patient_data, create_batch_dummy_patient_data
 
 import logging
@@ -60,6 +60,107 @@ patient_data_lock = threading.Lock()
 _infer_lock = threading.Lock()
 consultation_data_lock = threading.Lock()
 
+# --- New helpers for RAW v2 structure ---
+def _extract_image_type(img: Dict[str, Any]) -> Optional[str]:
+    """
+    Map RAW v2 eye_classification.class to internal types:
+      Left fundus -> 左眼CFP
+      Right fundus -> 右眼CFP
+      Left outer eye -> 左眼外眼照
+      Right outer eye -> 右眼外眼照
+    """
+    try:
+        cls = str(img.get("eye_classification", {}).get("class", "")).strip().lower()
+    except Exception:
+        cls = ""
+    if cls == "left fundus":
+        return "左眼CFP"
+    if cls == "right fundus":
+        return "右眼CFP"
+    if cls == "left outer eye":
+        return "左眼外眼照"
+    if cls == "right outer eye":
+        return "右眼外眼照"
+    return None
+
+def _extract_disease_probs(img: Dict[str, Any]) -> Dict[str, float]:
+    """
+    Use fundus_classification.diseases as disease probs if present.
+    If missing or invalid, return {}.
+    """
+    try:
+        diseases = img.get("fundus_classification", {}).get("diseases", {})
+        if isinstance(diseases, dict):
+            # ensure float
+            return {str(k): float(v) for k, v in diseases.items() if isinstance(v, (int, float))}
+    except Exception:
+        pass
+    return {}
+
+def _parse_ts_from_imgpath(p: str) -> int:
+    """
+    Keep the original timestamp/digits extraction to sort 'latest' images.
+    """
+    try:
+        base = os.path.basename(p or "")
+        name, _ = os.path.splitext(base)
+        parts = (name or "").split('_')
+        cand = parts[-1] if parts else name
+        digits = ''.join(ch for ch in (cand or "") if ch.isdigit())
+        return int(digits) if digits else 0
+    except Exception:
+        return 0
+
+def _warm_raw_cache_from_raw_json(ris_exam_id: str) -> None:
+    """
+    Build raw_probs_cache[ris_exam_id] from RAW_JSON_PATH with new structure.
+    by_type: Dict[type, List[image_dict]] (each image dict augmented with 'probs' = diseases)
+    by_id:   Dict[img_id, Dict[disease->prob]]
+    """
+    if not os.path.exists(RAW_JSON_PATH):
+        raise FileNotFoundError("RAW file not found")
+
+    with open(RAW_JSON_PATH, "r", encoding="utf-8") as f:
+        all_json = json.load(f)
+
+    raw_patient = all_json.get(ris_exam_id, {})
+    if not isinstance(raw_patient, dict):
+        raise KeyError("Invalid RAW patient entry")
+
+    images = raw_patient.get("images", [])
+    if not isinstance(images, list):
+        images = []
+
+    raw_by_type: Dict[str, list] = {}
+    raw_by_id: Dict[str, Dict] = {}
+
+    for img in images:
+        if not isinstance(img, dict):
+            continue
+        img_type = _extract_image_type(img)
+        if not img_type:
+            continue
+
+        probs = _extract_disease_probs(img)
+
+        # cache by id
+        img_id = f"img_{ris_exam_id}_{img.get('img_path', '')}"
+        raw_by_id[img_id] = probs
+
+        # push into type list; augment with 'probs' for fallback users
+        img_copy = dict(img)
+        img_copy["probs"] = probs
+        raw_by_type.setdefault(img_type, []).append(img_copy)
+
+    # sort lists latest-first by parsed digits from img_path
+    for k in list(raw_by_type.keys()):
+        raw_by_type[k] = sorted(
+            raw_by_type[k],
+            key=lambda im: _parse_ts_from_imgpath(im.get("img_path", "")),
+            reverse=True
+        )
+
+    raw_probs_cache[ris_exam_id] = {"by_type": raw_by_type, "by_id": raw_by_id}
 
 # No preloading - data will be loaded on-demand
 
@@ -77,37 +178,7 @@ async def get_patient_by_id(ris_exam_id: str):
             # Warm raw prob cache if missing
             if ris_exam_id not in raw_probs_cache:
                 try:
-                    def _parse_ts(p: str) -> int:
-                        try:
-                            base = os.path.basename(p)
-                            name, _ = os.path.splitext(base)
-                            parts = name.split('_')
-                            cand = parts[-1] if parts else name
-                            digits = ''.join(ch for ch in cand if ch.isdigit())
-                            return int(digits) if digits else 0
-                        except Exception:
-                            return 0
-                    import json, os
-                    with open(RAW_JSON_PATH, "r", encoding="utf-8") as f:
-                        all_json = json.load(f)
-                    raw_patient = all_json.get(ris_exam_id, {})
-                    image_type_mapping = {
-                        "右眼眼底": "右眼CFP",
-                        "左眼眼底": "左眼CFP",
-                        "右眼外观": "右眼外眼照",
-                        "左眼外观": "左眼外眼照",
-                    }
-                    raw_by_type: Dict[str, list] = {}
-                    raw_by_id: Dict[str, Dict] = {}
-                    for img in raw_patient.get("images", []):
-                        mapped_type = image_type_mapping.get(img.get("eye", ""), "")
-                        raw_by_type.setdefault(mapped_type, []).append(img)
-                        img_id = f"img_{ris_exam_id}_{img.get('img_path', '')}"
-                        raw_by_id[img_id] = img.get("probs", {})
-                    # sort lists once, keep only needed order
-                    for k in list(raw_by_type.keys()):
-                        raw_by_type[k] = sorted(raw_by_type[k], key=lambda im: _parse_ts(im.get("img_path", "")), reverse=True)
-                    raw_probs_cache[ris_exam_id] = {"by_type": raw_by_type, "by_id": raw_by_id}
+                    _warm_raw_cache_from_raw_json(ris_exam_id)
                 except Exception:
                     pass
             return patients_data_cache[ris_exam_id]
@@ -121,36 +192,7 @@ async def get_patient_by_id(ris_exam_id: str):
             patients_data_cache[ris_exam_id] = patient_data
             # Build raw prob cache for this patient (warm for reselection)
             try:
-                def _parse_ts(p: str) -> int:
-                    try:
-                        base = os.path.basename(p)
-                        name, _ = os.path.splitext(base)
-                        parts = name.split('_')
-                        cand = parts[-1] if parts else name
-                        digits = ''.join(ch for ch in cand if ch.isdigit())
-                        return int(digits) if digits else 0
-                    except Exception:
-                        return 0
-                import json, os
-                with open(RAW_JSON_PATH, "r", encoding="utf-8") as f:
-                    all_json = json.load(f)
-                raw_patient = all_json.get(ris_exam_id, {})
-                image_type_mapping = {
-                    "右眼眼底": "右眼CFP",
-                    "左眼眼底": "左眼CFP",
-                    "右眼外观": "右眼外眼照",
-                    "左眼外观": "左眼外眼照",
-                }
-                raw_by_type: Dict[str, list] = {}
-                raw_by_id: Dict[str, Dict] = {}
-                for img in raw_patient.get("images", []):
-                    mapped_type = image_type_mapping.get(img.get("eye", ""), "")
-                    raw_by_type.setdefault(mapped_type, []).append(img)
-                    img_id = f"img_{ris_exam_id}_{img.get('img_path', '')}"
-                    raw_by_id[img_id] = img.get("probs", {})
-                for k in list(raw_by_type.keys()):
-                    raw_by_type[k] = sorted(raw_by_type[k], key=lambda im: _parse_ts(im.get("img_path", "")), reverse=True)
-                raw_probs_cache[ris_exam_id] = {"by_type": raw_by_type, "by_id": raw_by_id}
+                _warm_raw_cache_from_raw_json(ris_exam_id)
             except Exception:
                 pass
             elapsed = time.time() - start_time
@@ -249,40 +291,9 @@ async def update_selection(request: UpdateSelectionRequest):
         # We need access to original JSON probs to recompute.
         # Prefer in-memory cache to avoid disk IO; ensure it's present.
         if request.patient_id not in raw_probs_cache:
-            # Try to warm the cache quickly from disk
+            # Try to warm the cache quickly from disk (RAW v2)
             try:
-                def _parse_ts(p: str) -> int:
-                    try:
-                        base = os.path.basename(p)
-                        name, _ = os.path.splitext(base)
-                        parts = name.split('_')
-                        cand = parts[-1] if parts else name
-                        digits = ''.join(ch for ch in cand if ch.isdigit())
-                        return int(digits) if digits else 0
-                    except Exception:
-                        return 0
-                import json, os
-                with open(RAW_JSON_PATH, "r", encoding="utf-8") as f:
-                    all_json = json.load(f)
-                raw_patient = all_json.get(request.patient_id)
-                if raw_patient is None:
-                    raise HTTPException(status_code=404, detail="Patient raw data not found")
-                image_type_mapping = {
-                    "右眼眼底": "右眼CFP",
-                    "左眼眼底": "左眼CFP",
-                    "右眼外观": "右眼外眼照",
-                    "左眼外观": "左眼外眼照",
-                }
-                raw_by_type: Dict[str, list] = {}
-                raw_by_id: Dict[str, Dict] = {}
-                for img in raw_patient.get("images", []):
-                    mapped_type = image_type_mapping.get(img.get("eye", ""), "")
-                    raw_by_type.setdefault(mapped_type, []).append(img)
-                    img_id = f"img_{request.patient_id}_{img.get('img_path', '')}"
-                    raw_by_id[img_id] = img.get("probs", {})
-                for k in list(raw_by_type.keys()):
-                    raw_by_type[k] = sorted(raw_by_type[k], key=lambda im: _parse_ts(im.get("img_path", "")), reverse=True)
-                raw_probs_cache[request.patient_id] = {"by_type": raw_by_type, "by_id": raw_by_id}
+                _warm_raw_cache_from_raw_json(request.patient_id)
             except Exception:
                 raise HTTPException(status_code=501, detail="Recompute not supported without source data")
 
@@ -434,6 +445,54 @@ async def add_new_patient_data(patient_data: PatientData):
         patients_data_cache[patient_data.patient_id] = patient_data
         print(f"New patient {patient_data.patient_id} added to cache.")
         return {"status": f"Patient {patient_data.patient_id} added successfully to cache."}
+
+
+@app.post("/api/alter_threshold")
+async def alter_threshold(request: AlterThresholdRequest):
+    """
+    Cycles between different threshold sets for a patient and recomputes diagnosis results.
+    """
+    with patient_data_lock:
+        patient = patients_data_cache.get(request.patient_id)
+        if not patient:
+            raise HTTPException(status_code=404, detail=f"Patient {request.patient_id} not found in cache.")
+        
+        # Cycle to the next threshold set (0 -> 1, 1 -> 0)
+        current_set = getattr(patient, 'active_threshold_set', 0)
+        next_set = 1 if current_set == 0 else 0
+        
+        # Get the new threshold values
+        new_thresholds = EyePredictionThresholds.get_threshold_set(next_set)
+        
+        # Update patient's threshold set and active set index
+        patient.prediction_thresholds = new_thresholds
+        patient.active_threshold_set = next_set
+        
+        # Recompute diagnosis results with new thresholds
+        diagnosis_results = {}
+        for eye in ["left_eye", "right_eye"]:
+            if eye not in patient.prediction_results:
+                continue
+                
+            diag = {}
+            prediction = patient.prediction_results[eye]
+            
+            for disease in ["青光眼", "糖网", "AMD", "病理性近视", "RVO", "RAO", "视网膜脱离", "其它视网膜病", "其它黄斑病变", "白内障", "正常"]:
+                threshold = getattr(new_thresholds, disease, 0.5)
+                prob = getattr(prediction, disease, 0.0)
+                diag[disease] = prob >= threshold
+            
+            diagnosis_results[eye] = EyeDiagnosis(**diag)
+        
+        # Update patient's diagnosis results
+        patient.diagnosis_results = diagnosis_results
+        
+        return {
+            "status": "Threshold altered successfully",
+            "active_threshold_set": next_set,
+            "new_thresholds": new_thresholds.dict(),
+            "updated_diagnosis_results": diagnosis_results
+        }
 
 
 # --- Consultation Data Models (accept free text and arrays) ---
@@ -603,7 +662,7 @@ def _get_patient_context(ris_exam_id: str) -> Dict[str, Optional[str]]:
 def _find_best_matching_index(all_data: List[Dict[str, Any]], patient_name: Optional[str], exam_time: Optional[str]) -> Optional[int]:
     """
     Same selection rule as find_best_matching_consultation, but returns index in list.
-    Prefers submissionTime <= examineTime (closest), else earliest after.
+    Prefers submissionTime <= examTime (closest), else earliest after.
     """
     if not patient_name or not isinstance(all_data, list) or len(all_data) == 0:
         return None
