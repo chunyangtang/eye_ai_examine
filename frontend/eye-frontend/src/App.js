@@ -2059,11 +2059,11 @@ function App() {
                   )}
                 </div>
 
-                {/* Chat scroll area with fixed height */}
+                {/* Chat scroll area with fixed height - Made 2x taller */}
                 <div
                   ref={sideChatScrollRef}
                   onScroll={handleSideChatScroll}
-                  className="relative h-[300px] overflow-y-auto overscroll-contain
+                  className="relative h-[600px] overflow-y-auto overscroll-contain
                            border border-gray-200 rounded p-2 bg-gray-50 mb-3"
                 >
                   {sideChatMessages.length === 0 && (

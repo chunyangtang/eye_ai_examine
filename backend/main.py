@@ -1018,31 +1018,6 @@ def _summarize_consultation(cons: Optional[Dict[str, Any]]) -> str:
         if x: parts.append(x)
     return "；".join(parts) if parts else "无"
 
-def _summarize_ai(patient: Optional[PatientData], eye_key: str) -> str:
-    if not patient or not getattr(patient, "prediction_results", None):
-        return "无"
-    preds = getattr(patient.prediction_results, eye_key, None) if hasattr(patient.prediction_results, eye_key) else patient.prediction_results.get(eye_key)  # type: ignore
-    if hasattr(preds, "dict"):
-        preds = preds.dict()  # type: ignore
-    if not isinstance(preds, dict):
-        return "无"
-    # Try to read thresholds
-    th = getattr(patient, "prediction_thresholds", None)
-    thd = th.dict() if hasattr(th, "dict") else (th or {})
-    # Rank top-3
-    items = []
-    for k, v in preds.items():
-        try:
-            items.append((k, float(v), float(thd.get(k, 0.5))))
-        except Exception:
-            continue
-    items.sort(key=lambda t: t[1], reverse=True)
-    top = items[:3]
-    if not top:
-        return "无"
-    parts = [f"{k} P={_format_prob(p)} (T={_format_prob(t)})" for k, p, t in top]
-    return "，".join(parts)
-
 def _summarize_thresholds(patient: Optional[PatientData]) -> str:
     """总结阈值设置"""
     if not patient:
@@ -1487,52 +1462,6 @@ def _llm_env():
         "provider": os.getenv("LLM_PROVIDER", "ollama"),
     }
 
-def format_llm_output_for_frontend(text: str) -> str:
-    """
-    将LLM输出转换为前端友好的格式
-    支持基本的Markdown到HTML转换和换行处理
-    """
-    if not text:
-        return text
-    
-    # 处理换行符
-    text = text.replace('\n', '<br>')
-    
-    # 处理加粗 **text** -> <strong>text</strong>
-    import re
-    text = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', text)
-    
-    # 处理斜体 *text* -> <em>text</em>  
-    text = re.sub(r'\*(.*?)\*', r'<em>\1</em>', text)
-    
-    # 处理标题 ## text -> <h3>text</h3>
-    text = re.sub(r'^### (.*?)$', r'<h4>\1</h4>', text, flags=re.MULTILINE)
-    text = re.sub(r'^## (.*?)$', r'<h3>\1</h3>', text, flags=re.MULTILINE)
-    text = re.sub(r'^# (.*?)$', r'<h2>\1</h2>', text, flags=re.MULTILINE)
-    
-    # 处理列表项 - text -> <li>text</li>
-    lines = text.split('<br>')
-    formatted_lines = []
-    in_list = False
-    
-    for line in lines:
-        line = line.strip()
-        if line.startswith('- ') or line.startswith('• '):
-            if not in_list:
-                formatted_lines.append('<ul>')
-                in_list = True
-            formatted_lines.append(f'<li>{line[2:].strip()}</li>')
-        else:
-            if in_list:
-                formatted_lines.append('</ul>')
-                in_list = False
-            formatted_lines.append(line)
-    
-    if in_list:
-        formatted_lines.append('</ul>')
-    
-    return '<br>'.join(formatted_lines)
-
 @app.post("/api/llm_chat_stream")
 async def llm_chat_stream(req: LLMChatRequest):
     env = _llm_env()
@@ -1540,7 +1469,8 @@ async def llm_chat_stream(req: LLMChatRequest):
     
     # 构建消息列表
     messages_to_send: List[Dict[str, str]] = []
-    sys_prompt = cfg.get("system_prompt", "") or ""
+    # Use original system prompt from config, but keep simple fallback
+    sys_prompt = cfg.get("system_prompt", "") or "你是一个有用的AI助手。"
     
     # 检查是否是首次更新推理请求（只有一个user消息且内容是update_prompt）
     is_initial_update = (
@@ -1552,55 +1482,55 @@ async def llm_chat_stream(req: LLMChatRequest):
     if is_initial_update:
         # 对于初次更新推理请求，将所有信息合并为一个user prompt
         context_text = ""
+        # DEBUGGING: Check context length and truncate if too long
         if cfg.get("include_patient_context", True):
             placeholders = _build_context_placeholders(req.patient_id)
             context_text = _fill_template(cfg.get("context_template", ""), placeholders)
-        
-        # 构建完整的单个user prompt
-        combined_prompt_parts = []
+            
+            # Log context length for debugging
+            logger.info(f"Context text length: {len(context_text)} characters")
+            
+            # If context is too long, truncate it for testing
+            if len(context_text) > 1000:
+                context_text = context_text[:1000] + "...[TRUNCATED FOR TESTING]"
+                logger.info(f"Truncated context to {len(context_text)} characters")
         
         # 添加系统角色说明
         if sys_prompt:
-            combined_prompt_parts.append(f"角色要求：{sys_prompt}")
+            messages_to_send.append({"role": "system", "content": sys_prompt})
         
-        # 添加患者上下文
+        # 添加患者上下文 with length management
         if context_text.strip():
-            combined_prompt_parts.append(f"患者信息：\n{context_text}")
-        
-        # 添加任务要求
-        update_prompt = cfg.get("update_prompt", "基于提供的患者信息，直接给出临床分析和建议，分为两部分：1）临床推理过程 2）意见摘要")
-        combined_prompt_parts.append(f"任务要求：{update_prompt}")
-        
-        # 合并为单个user消息
-        combined_content = "\n\n".join(combined_prompt_parts)
-        messages_to_send.append({"role": "user", "content": combined_content})
+            # Limit context length to prevent overwhelming the model
+            if len(context_text) > 2000:
+                context_text = context_text[:2000] + "...[内容过长已截断]"
+                logger.info(f"Truncated initial context to {len(context_text)} characters")
+            messages_to_send.append({"role": "user", "content": "/no_think " + context_text})
         
     else:
-        # 对于后续对话，也使用user方式传递上下文信息
+        # 对于后续对话，构建完整的消息序列
         context_text = ""
-        # 构建上下文信息时使用ris_exam_id
+        # DEBUGGING: Check context length and truncate if too long  
         if cfg.get("include_patient_context", True):
             placeholders = _build_context_placeholders(req.patient_id)  # 这里req.patient_id实际上是ris_exam_id
             context_text = _fill_template(cfg.get("context_template", ""), placeholders)
-        
-        # 构建包含上下文的user消息作为第一条消息
-        context_prompt_parts = []
-        
+            
+            # Log context length for debugging
+            logger.info(f"Follow-up context text length: {len(context_text)} characters")
+            
+            # If context is too long, truncate it for testing
+            if len(context_text) > 1000:
+                context_text = context_text[:1000] + "...[TRUNCATED FOR TESTING]"
+                logger.info(f"Truncated follow-up context to {len(context_text)} characters")
+
         # 添加系统角色说明
         if sys_prompt:
-            context_prompt_parts.append(f"角色要求：{sys_prompt}")
-        
-        # 添加患者上下文
-        if context_text.strip():
-            context_prompt_parts.append(f"患者信息：\n{context_text}")
-        
-        # 如果有上下文信息，将其作为第一条user消息
-        if context_prompt_parts:
-            context_content = "\n\n".join(context_prompt_parts)
-            messages_to_send.append({"role": "user", "content": context_content})
-            # 添加一个简短的assistant确认消息
-            messages_to_send.append({"role": "assistant", "content": "已了解患者信息和角色要求。"})
+            messages_to_send.append({"role": "system", "content": sys_prompt})
 
+        # DEBUGGING: Re-enable context but keep length management
+        should_add_context = True  # Re-enable context
+        # should_add_context = False  # Force disable context
+        
         # 加载历史对话记录
         if req.patient_id:
             try:
@@ -1611,30 +1541,59 @@ async def llm_chat_stream(req: LLMChatRequest):
                     history = llm_context.get("history", [])
                     
                     if isinstance(history, list) and history:
-                        # 只保留user/assistant对话，跳过任何system消息
-                        conversation_history = [
-                            msg for msg in history 
-                            if isinstance(msg, dict) and 
-                            msg.get("role") in ["user", "assistant"] and 
-                            msg.get("content", "").strip()
-                        ]
+                        # 验证并清理历史消息
+                        conversation_history = []
+                        for msg in history:
+                            if (isinstance(msg, dict) and 
+                                isinstance(msg.get("role"), str) and
+                                isinstance(msg.get("content"), str) and
+                                msg.get("role") in ["user", "assistant"] and 
+                                msg.get("content", "").strip()):
+                                conversation_history.append(msg)
                         
-                        # 添加历史对话
-                        messages_to_send.extend(conversation_history)
-                        logger.info(f"Loaded {len(conversation_history)} historical messages for patient {req.patient_id}")
+                        if conversation_history:
+                            # 有历史记录，不需要再添加初始上下文
+                            should_add_context = False
+                            messages_to_send.extend(conversation_history)
+                            logger.info(f"Loaded {len(conversation_history)} historical messages for patient {req.patient_id}")
+                        else:
+                            logger.info(f"History exists but no valid messages found for patient {req.patient_id}")
                     else:
                         logger.info(f"No conversation history found for patient {req.patient_id}")
             except Exception as e:
                 logger.warning(f"Failed to load conversation history for patient {req.patient_id}: {e}")
+                # Continue without history rather than failing
+                
+        # 如果需要添加上下文且有有效内容 with length management
+        if should_add_context and context_text.strip():
+            # Limit context length to prevent overwhelming the model
+            if len(context_text) > 2000:
+                context_text = context_text[:2000] + "...[内容过长已截断]"
+                logger.info(f"Truncated follow-up context to {len(context_text)} characters")
+            messages_to_send.append({"role": "user", "content": "/no_think " + context_text})
+            
+        # 验证并添加当前请求的新消息
+        if req.messages:
+            for msg in req.messages:
+                if (isinstance(msg, dict) and 
+                    isinstance(msg.get("role"), str) and
+                    isinstance(msg.get("content"), str) and
+                    msg.get("role") == "user" and 
+                    msg.get("content", "").strip()):
+                    # Add /no_think tag to user messages for DeepSeek model
+                    content = msg.get("content", "").strip()
+                    if not content.startswith("/no_think"):
+                        content = "/no_think " + content
+                    messages_to_send.append({"role": "user", "content": content})
+                elif isinstance(msg, dict):
+                    logger.warning(f"Invalid message format: role='{msg.get('role')}', content type={type(msg.get('content'))}, content length={len(str(msg.get('content', '')))}")
 
-        # 添加当前请求的新消息
-        current_messages = req.messages or []
-        # 只添加user消息，因为assistant消息应该来自历史记录
-        new_user_messages = [
-            msg for msg in current_messages 
-            if msg.get("role") == "user"
-        ]
-        messages_to_send.extend(new_user_messages)
+    # 验证消息列表不为空
+    if not messages_to_send:
+        logger.error("No valid messages to send to OLLAMA")
+        async def empty_response():
+            yield "\n[错误] 没有有效的消息可发送\n"
+        return StreamingResponse(empty_response(), media_type="text/plain; charset=utf-8")
 
     # === 添加DEBUG日志 ===
     logger.info("=" * 80)
@@ -1643,29 +1602,36 @@ async def llm_chat_stream(req: LLMChatRequest):
     logger.info(f"Environment: {env}")
     logger.info(f"Messages count: {len(messages_to_send)}")
     
-    # for i, msg in enumerate(messages_to_send):
-    #     role = msg.get("role", "unknown")
-    #     content = msg.get("content", "")
-    #     logger.info(f"Message [{i+1}] ({role}):")
-    #     logger.info("-" * 40)
-    #     if len(content) > 500:
-    #         logger.info(f"{content[:500]}...\n[TRUNCATED - Total length: {len(content)} chars]")
-    #     else:
-    #         logger.info(content)
-    #     logger.info("-" * 40)
+    for i, msg in enumerate(messages_to_send):
+        role = msg.get("role", "unknown")
+        content = msg.get("content", "")
+        logger.info(f"Message [{i+1}] ({role}):")
+        logger.info("-" * 40)
+        if len(content) > 500:
+            logger.info(f"{content[:500]}...\n[TRUNCATED - Total length: {len(content)} chars]")
+        else:
+            logger.info(content)
+        logger.info("-" * 40)
     
-    # logger.info("=" * 80)
+    logger.info("=" * 80)
 
     # 获取最后一个用户消息用于持久化
     last_user = ""
     if is_initial_update:
-        last_user = cfg.get("update_prompt", "")
+        last_user = context_text
     else:
         # 从当前请求中获取最新的用户消息
-        for m in reversed(req.messages or []):
-            if m.get("role") == "user":
-                last_user = m.get("content", "")
-                break
+        if req.messages:
+            for m in reversed(req.messages):
+                if isinstance(m, dict) and m.get("role") == "user" and m.get("content", "").strip():
+                    # Store original message without /no_think tag for persistence
+                    original_content = m.get("content", "")
+                    last_user = original_content.replace("/no_think ", "").strip() if original_content.startswith("/no_think ") else original_content
+                    break
+        
+        # 如果没有找到用户消息，记录警告
+        if not last_user:
+            logger.warning(f"No user message found in request for persistence. Messages: {req.messages}")
 
     # 缓存助手回复内容
     assistant_buf: List[str] = []
@@ -1712,6 +1678,7 @@ async def llm_chat_stream(req: LLMChatRequest):
                         
                         try:
                             obj = json.loads(line)
+                            logger.info(f"Parsed response chunk #{response_chunks}: {obj}")
                         except json.JSONDecodeError:
                             logger.warning(f"Failed to parse JSON line: {line[:100]}...")
                             continue
@@ -1739,157 +1706,41 @@ async def llm_chat_stream(req: LLMChatRequest):
         except httpx.TimeoutException:
             logger.error("OLLAMA request timeout")
             yield "\n[OLLAMA **错误**] 请求超时，请检查OLLAMA服务是否正常运行\n"
-        except httpx.ConnectError:
-            logger.error(f"Cannot connect to OLLAMA service: {env['base']}")
+        except httpx.ConnectError as e:
+            logger.error(f"Cannot connect to OLLAMA service: {env['base']} - {str(e)}")
             yield f"\n[OLLAMA **错误**] 无法连接到OLLAMA服务 {env['base']}\n"
+        except httpx.RequestError as e:
+            logger.error(f"OLLAMA request error: {str(e)}")
+            yield f"\n[OLLAMA **错误**] 请求失败: {str(e)}\n"
         except Exception as e:
             logger.error(f"OLLAMA request failed: {str(e)}")
             yield f"\n[OLLAMA **错误**] {str(e)}\n"
         finally:
-            if req.persist and req.patient_id and assistant_buf:
-                full_response = "".join(assistant_buf)
-                logger.info(f"Persisting LLM context for patient {req.patient_id}")
-                
-                persist_llm_context(
-                    req.patient_id,
-                    system_prompt="",  # 不再使用system_prompt持久化
-                    context_text="",   # 不再单独存储context_text
-                    user_prompt=last_user,
-                    assistant_text=full_response,
-                    reset=bool(req.reset),
-                )
+            # 只有当有assistant回复且需要持久化时才保存
+            if req.persist and req.patient_id and assistant_buf and last_user:
+                try:
+                    full_response = "".join(assistant_buf)
+                    logger.info(f"Persisting LLM context for patient {req.patient_id}, response length: {len(full_response)}")
+                    
+                    persist_llm_context(
+                        req.patient_id,
+                        system_prompt="",  # 不再使用system_prompt持久化
+                        context_text="",   # 不再单独存储context_text
+                        user_prompt=last_user,
+                        assistant_text=full_response,
+                        reset=bool(req.reset),
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to persist LLM context for patient {req.patient_id}: {e}")
+            elif req.persist and req.patient_id:
+                if not assistant_buf:
+                    logger.warning(f"No assistant response to persist for patient {req.patient_id}")
+                if not last_user:
+                    logger.warning(f"No user message to persist for patient {req.patient_id}")
 
     return StreamingResponse(ollama_stream(), media_type="text/plain; charset=utf-8")
 
-# 同样更新格式化版本
-@app.post("/api/llm_chat_formatted")
-async def llm_chat_formatted(req: LLMChatRequest):
-    """
-    提供格式化的LLM响应（非流式），支持HTML格式，统一使用user方式传递上下文
-    """
-    env = _llm_env()
-    cfg = load_llm_prompts()
-    
-    # 构建消息（统一使用user方式）
-    messages_to_send: List[Dict[str, str]] = []
-    sys_prompt = cfg.get("system_prompt", "") or ""
-    
-    # 构建上下文信息
-    context_text = ""
-    if cfg.get("include_patient_context", True):
-        placeholders = _build_context_placeholders(req.patient_id)
-        context_text = _fill_template(cfg.get("context_template", ""), placeholders)
-    
-    # 构建包含上下文的user消息
-    context_prompt_parts = []
-    
-    # 添加系统角色说明
-    if sys_prompt:
-        context_prompt_parts.append(f"角色要求：{sys_prompt}")
-    
-    # 添加患者上下文
-    if context_text.strip():
-        context_prompt_parts.append(f"患者信息：\n{context_text}")
-    
-    # 如果有上下文信息，将其作为第一条user消息
-    if context_prompt_parts:
-        context_content = "\n\n".join(context_prompt_parts)
-        messages_to_send.append({"role": "user", "content": context_content})
-        # 添加一个简短的assistant确认消息
-        messages_to_send.append({"role": "assistant", "content": "已了解患者信息和角色要求。"})
 
-    # 添加当前请求的消息
-    messages_to_send.extend(req.messages or [])
-    
-    # === 添加DEBUG日志 ===
-    logger.info("=" * 80)
-    logger.info(f"LLM Chat Formatted Request for Patient: {req.patient_id}")
-    logger.info("=" * 80)
-    logger.info(f"Environment: {env}")
-    logger.info(f"Messages count: {len(messages_to_send)}")
-    
-    for i, msg in enumerate(messages_to_send):
-        role = msg.get("role", "unknown")
-        content = msg.get("content", "")
-        logger.info(f"Message [{i+1}] ({role}):")
-        logger.info("-" * 40)
-        if len(content) > 500:
-            logger.info(f"{content[:500]}...\n[TRUNCATED - Total length: {len(content)} chars]")
-        else:
-            logger.info(content)
-        logger.info("-" * 40)
-    
-    logger.info("=" * 80)
-    
-    last_user = ""
-    for m in reversed(req.messages or []):
-        if m.get("role") == "user":
-            last_user = m.get("content", "")
-            break
-
-    # 非流式请求
-    url = f"{env['base'].rstrip('/')}/api/chat"
-    headers = {"Content-Type": "application/json"}
-    payload = {
-        "model": env["model"],
-        "messages": messages_to_send,
-        "stream": False
-    }
-    
-    logger.info(f"Sending formatted request to OLLAMA: {url}")
-    logger.info(f"Payload model: {payload['model']}")
-    logger.info(f"Payload stream: {payload['stream']}")
-    
-    timeout = httpx.Timeout(120.0)
-    try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(url, headers=headers, json=payload)
-            logger.info(f"OLLAMA Formatted Response Status: {response.status_code}")
-            
-            if response.status_code != 200:
-                error_text = response.text
-                logger.error(f"OLLAMA Formatted Error: {error_text}")
-                return {"error": f"HTTP {response.status_code}: {error_text}"}
-            
-            result = response.json()
-            if "error" in result:
-                logger.error(f"OLLAMA Formatted Response Error: {result['error']}")
-                return {"error": result["error"]}
-            
-            message = result.get("message", {})
-            content = message.get("content", "")
-            
-            if content:
-                logger.info(f"OLLAMA Formatted Response Length: {len(content)} chars")
-                logger.info(f"OLLAMA Formatted Response Preview: {content[:200]}...")
-                
-                # 格式化输出
-                formatted_content = format_llm_output_for_frontend(content)
-                
-                # 持久化
-                if req.persist and req.patient_id:
-                    logger.info(f"Persisting formatted LLM context for patient {req.patient_id}")
-                    persist_llm_context(
-                        req.patient_id,
-                        system_prompt="",  # 不再使用system_prompt
-                        context_text="",   # 不再单独存储context_text
-                        user_prompt=last_user,
-                        assistant_text=content,
-                        reset=bool(req.reset),
-                    )
-                
-                return {
-                    "content": content,
-                    "formatted_content": formatted_content,
-                    "status": "success"
-                }
-            else:
-                logger.warning("Empty response from OLLAMA formatted endpoint")
-                return {"error": "Empty response from OLLAMA"}
-            
-    except Exception as e:
-        logger.error(f"OLLAMA formatted request failed: {str(e)}")
-        return {"error": f"Request failed: {str(e)}"}
 
 if __name__ == "__main__":
     import uvicorn
