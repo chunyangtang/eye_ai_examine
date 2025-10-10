@@ -786,8 +786,7 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [backendUrl]);
 
-  // Load persisted LLM chat history when patient changes
-  // 若对话为空，则自动开始“更新最新结果”
+  // Auto-trigger LLM regeneration once per patient when chat is empty
   useEffect(() => {
     const pid = getCurrentPatientId();
     if (!pid) return;
@@ -803,34 +802,7 @@ function App() {
     // 仅监听必要的状态，避免依赖未初始化的 const
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [patientData, llmLoading, sideChatMessages.length, getCurrentPatientId]);
-  // useEffect(() => {
-  //   const pid = getCurrentPatientId();
-  //   if (!pid) return;
-  //   let aborted = false;
-
-  //   (async () => {
-  //     try {
-  //       const res = await fetch(`${backendUrl}/api/llm_context/${pid}`, { cache: 'no-store' });
-  //       if (!res.ok) return;
-  //       const data = await res.json();
-  //       if (aborted) return;
-  //       const hist = Array.isArray(data?.llm_context?.history) ? data.llm_context.history : [];
-  //       // keep only well-formed turns
-  //       const normalized = hist.filter(m => m && typeof m.role === 'string' && typeof m.content === 'string');
-  //       setSideChatMessages(normalized);
-  //       // snap to bottom
-  //       requestAnimationFrame(() => {
-  //         const el = sideChatScrollRef.current;
-  //         if (el) {
-  //           el.scrollTop = el.scrollHeight;
-  //           setAutoScrollChat(true);
-  //         }
-  //       });
-  //     } catch {}
-  //   })();
-
-  //   return () => { aborted = true; };
-  // }, [backendUrl, getCurrentPatientId]);
+  
 
   // Chat scroll handling (only autoscroll if user is at bottom)
   useEffect(() => {
@@ -871,26 +843,26 @@ function App() {
     };
   }, []);
 
-  // Streaming send with persistence flags
+  // Streaming send helper for LLM side chat
   const sendSideChatStreaming = async (text, opts = {}) => {
     const q = (text ?? sideChatInput).trim();
     const reset = !!opts.reset;
     if (!q || llmLoading) return;
 
+    const existingMessages = reset ? [] : sideChatMessages;
+
     if (text === undefined) setSideChatInput('');
 
-    if (reset) {
-      // clear UI first
-      setSideChatMessages([]);
-    }
+    const history = [
+      ...existingMessages
+        .filter(m => m && typeof m.role === 'string' && typeof m.content === 'string' && ['user', 'assistant'].includes(m.role))
+        .map(m => ({ role: m.role, content: m.content })),
+      { role: 'user', content: q }
+    ];
 
-    // Only send the new user prompt; backend injects system/context/history
-    const history = [{ role: 'user', content: q }];
-
-    // Append placeholder
-    setSideChatMessages(prev => [
-      ...(reset ? [] : prev),
-      { role: 'user', content: q },
+    // Append placeholder for streaming assistant reply
+    setSideChatMessages(() => [
+      ...history,
       { role: 'assistant', content: '' },
     ]);
 
@@ -904,8 +876,6 @@ function App() {
       const payload = {
         patient_id: getCurrentPatientId(),
         messages: history,
-        persist: true,
-        reset,
       };
 
       const resp = await fetch(`${backendUrl}/api/llm_chat_stream`, {
@@ -951,16 +921,12 @@ function App() {
     }
   };
 
-  // Update button: clear persisted context on backend, clear UI, then regenerate
+  // Update button: clear UI, then regenerate
   const regenerateSideOpinion = async () => {
     const prompt =
       (llmConfig?.update_prompt && llmConfig.update_prompt.trim()) ||
       '请基于最新问诊信息、AI预测与人工复检结果，生成简要且可操作的临床意见摘要。';
 
-    const pid = getCurrentPatientId();
-    if (pid) {
-      try { await fetch(`${backendUrl}/api/llm_context/${pid}`, { method: 'DELETE' }); } catch {}
-    }
     setSideChatMessages([]);     // ensure UI reset immediately
     setAutoScrollChat(true);
     await sendSideChatStreaming(prompt, { reset: true });

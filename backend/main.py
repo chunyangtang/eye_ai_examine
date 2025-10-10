@@ -86,7 +86,6 @@ else:
 
 # Lock for thread-safe access to cached data
 patient_data_lock = threading.Lock()
-_infer_lock = threading.Lock()
 consultation_data_lock = threading.Lock()
 
 # --- New helpers for RAW v2 structure ---
@@ -1344,131 +1343,10 @@ def _fill_template(template: str, mapping: Dict[str, str]) -> str:
     return out
 
 
-def load_inference_map() -> Dict[str, Any]:
-    """
-    Read-only loader for overlay file (examine_results.json).
-    Fallback (read-only): if overlay missing or empty, try to extract only llm_context
-    from RAW_JSON_PATH (legacy polluted data), but NEVER write back to RAW.
-    """
-    # 1) Prefer overlay
-    try:
-        if os.path.exists(INFERENCE_RESULTS_PATH):
-            with open(INFERENCE_RESULTS_PATH, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                if isinstance(data, dict):
-                    return data
-    except Exception:
-        pass
-
-    # 2) Fallback: probe legacy llm_context from RAW (read-only)
-    try:
-        if os.path.exists(RAW_JSON_PATH):
-            with open(RAW_JSON_PATH, "r", encoding="utf-8") as f:
-                raw = json.load(f)
-            if isinstance(raw, dict):
-                overlay: Dict[str, Any] = {}
-                for k, v in raw.items():
-                    if isinstance(v, dict) and "llm_context" in v and isinstance(v["llm_context"], dict):
-                        overlay[k] = {"llm_context": v["llm_context"]}
-                return overlay
-    except Exception:
-        pass
-    return {}
-
-def save_inference_map(d: Dict[str, Any]) -> None:
-    """
-    Write ONLY to overlay (examine_results.json). Do not touch RAW_JSON_PATH.
-    """
-    os.makedirs(os.path.dirname(INFERENCE_RESULTS_PATH), exist_ok=True)
-    with open(INFERENCE_RESULTS_PATH, "w", encoding="utf-8") as f:
-        json.dump(d, f, ensure_ascii=False, indent=2)
-
-def persist_llm_context(
-    patient_id: str,
-    *,
-    system_prompt: str,
-    context_text: str,
-    user_prompt: str,
-    assistant_text: str,
-    reset: bool,
-) -> Dict[str, Any]:
-    with _infer_lock:
-        d = load_inference_map()
-        rec = d.get(patient_id)
-        if not isinstance(rec, dict):
-            rec = {}
-        # fresh context when reset; else append to existing
-        base_ctx = {} if reset or not isinstance(rec.get("llm_context"), dict) else rec["llm_context"]
-        history: List[Dict[str, str]] = []
-
-        if reset:
-            # put current system/context at top
-            if system_prompt:
-                history.append({"role": "system", "content": system_prompt})
-            if context_text.strip():
-                history.append({"role": "system", "content": f"[患者上下文]\n{context_text}"})
-        else:
-            old_hist = base_ctx.get("history")
-            if isinstance(old_hist, list):
-                history.extend([x for x in old_hist if isinstance(x, dict) and "role" in x and "content" in x])
-
-        # append the new turn
-        history.append({"role": "user", "content": user_prompt})
-        history.append({"role": "assistant", "content": assistant_text})
-
-        if len(history) > MAX_CHAT_HISTORY_MESSAGES:
-            logger.info(
-                "Trimming persisted history for %s from %s to %s messages",
-                patient_id,
-                len(history),
-                MAX_CHAT_HISTORY_MESSAGES
-            )
-            history = history[-MAX_CHAT_HISTORY_MESSAGES:]
-
-        rec["llm_context"] = {
-            "history": history,
-            "last_updated": datetime.datetime.now().astimezone().isoformat(),
-            "system_prompt": system_prompt,
-            "context_text": context_text,
-            "version": 1,
-        }
-        d[patient_id] = rec
-        save_inference_map(d)
-        return rec["llm_context"]
-
-@app.get("/api/llm_context/{patient_id}")
-async def get_llm_context(patient_id: str):
-    with _infer_lock:
-        d = load_inference_map()
-        rec = d.get(patient_id) or {}
-        ctx = rec.get("llm_context") or {}
-        if not isinstance(ctx, dict):
-            ctx = {}
-        return {
-            "status": "ok",
-            "patient_id": patient_id,
-            "llm_context": ctx,
-            "path": INFERENCE_RESULTS_PATH,   # write/read overlay path
-            "raw_path": RAW_JSON_PATH         # read-only RAW path for reference
-        }
-
-@app.delete("/api/llm_context/{patient_id}")
-async def delete_llm_context(patient_id: str):
-    with _infer_lock:
-        d = load_inference_map()
-        rec = d.get(patient_id)
-        if isinstance(rec, dict) and "llm_context" in rec:
-            rec.pop("llm_context", None)
-            d[patient_id] = rec
-            save_inference_map(d)
-    return {"status": "deleted", "patient_id": patient_id}
-
 # --- LLM chat (streaming) ---
 class LLMChatRequest(BaseModel):
     patient_id: Optional[str] = None
     messages: List[Dict[str, str]]  # [{role:'user'|'assistant'|'system', content:str}]
-    persist: Optional[bool] = True     # persist to inference_results.json
-    reset: Optional[bool] = False      # overwrite previous on this request
 
 
 def _llm_env():
@@ -1495,134 +1373,59 @@ async def llm_chat_stream(req: LLMChatRequest):
         req.messages[0].get("role") == "user" and
         req.messages[0].get("content", "").strip() == cfg.get("update_prompt", "").strip()
     )
-    
-    if is_initial_update:
-        # 对于初次更新推理请求，将所有信息合并为一个user prompt
-        context_text = ""
-        # DEBUGGING: Check context length and truncate if too long
-        if cfg.get("include_patient_context", True):
-            placeholders = _build_context_placeholders(req.patient_id)
-            context_text = _fill_template(cfg.get("context_template", ""), placeholders)
-            
-            # Log context length for debugging
-            logger.info(f"Context text length: {len(context_text)} characters")
-            
-            # If context is too long, truncate it for testing
-            if len(context_text) > 1000:
-                context_text = context_text[:1000] + "...[TRUNCATED FOR TESTING]"
-                logger.info(f"Truncated context to {len(context_text)} characters")
-        
-        # 添加系统角色说明
-        if sys_prompt:
-            messages_to_send.append({"role": "system", "content": sys_prompt})
-        
-        # 添加患者上下文 with length management
-        if context_text.strip():
-            # Limit context length to prevent overwhelming the model
-            if len(context_text) > 2000:
-                context_text = context_text[:2000] + "...[内容过长已截断]"
-                logger.info(f"Truncated initial context to {len(context_text)} characters")
-            messages_to_send.append({"role": "user", "content": "/no_think " + context_text})
-        
-    else:
-        # 对于后续对话，构建完整的消息序列
-        context_text = ""
-        # DEBUGGING: Check context length and truncate if too long  
-        if cfg.get("include_patient_context", True):
-            placeholders = _build_context_placeholders(req.patient_id)  # 这里req.patient_id实际上是ris_exam_id
-            context_text = _fill_template(cfg.get("context_template", ""), placeholders)
-            
-            # Log context length for debugging
+
+    context_text = ""
+    if cfg.get("include_patient_context", True):
+        placeholders = _build_context_placeholders(req.patient_id)
+        context_text = _fill_template(cfg.get("context_template", ""), placeholders)
+
+        if is_initial_update:
+            logger.info(f"Initial context text length: {len(context_text)} characters")
+        else:
             logger.info(f"Follow-up context text length: {len(context_text)} characters")
-            
-            # If context is too long, truncate it for testing
-            if len(context_text) > 1000:
-                context_text = context_text[:1000] + "...[TRUNCATED FOR TESTING]"
-                logger.info(f"Truncated follow-up context to {len(context_text)} characters")
 
-        # 添加系统角色说明
-        if sys_prompt:
-            messages_to_send.append({"role": "system", "content": sys_prompt})
+        if len(context_text) > 1000:
+            context_text = context_text[:1000] + "...[TRUNCATED FOR TESTING]"
+            logger.info(f"Truncated context to {len(context_text)} characters")
 
-        # DEBUGGING: Re-enable context but keep length management
-        should_add_context = True  # Re-enable context
-        # should_add_context = False  # Force disable context
-        
-        # 加载历史对话记录
-        if req.patient_id:
-            try:
-                with _infer_lock:
-                    d = load_inference_map()
-                    rec = d.get(req.patient_id, {})
-                    llm_context = rec.get("llm_context", {})
-                    history = llm_context.get("history", [])
-                    
-                    if isinstance(history, list) and history:
-                        # 验证并清理历史消息
-                        conversation_history = []
-                        for msg in history:
-                            if (isinstance(msg, dict) and 
-                                isinstance(msg.get("role"), str) and
-                                isinstance(msg.get("content"), str) and
-                                msg.get("role") in ["user", "assistant"] and 
-                                msg.get("content", "").strip()):
-                                conversation_history.append(msg)
-                        
-                        if conversation_history:
-                            if len(conversation_history) > MAX_CHAT_HISTORY_MESSAGES:
-                                logger.info(
-                                    "Trimming conversation history for %s from %s to %s messages",
-                                    req.patient_id,
-                                    len(conversation_history),
-                                    MAX_CHAT_HISTORY_MESSAGES
-                                )
-                                conversation_history = conversation_history[-MAX_CHAT_HISTORY_MESSAGES:]
-                            # 重新注入 /no_think 指令，避免历史消息缺失导致模型恢复思考输出
-                            transformed_history: List[Dict[str, str]] = []
-                            for hist_msg in conversation_history:
-                                if hist_msg.get("role") == "user":
-                                    hist_content = hist_msg.get("content", "").strip()
-                                    if hist_content and not hist_content.startswith("/no_think"):
-                                        hist_content = "/no_think " + hist_content
-                                    transformed_history.append({**hist_msg, "content": hist_content})
-                                else:
-                                    transformed_history.append(hist_msg)
+    if sys_prompt:
+        messages_to_send.append({"role": "system", "content": sys_prompt})
 
-                            # 有历史记录，不需要再添加初始上下文
-                            should_add_context = False
-                            messages_to_send.extend(transformed_history)
-                            logger.info(f"Loaded {len(conversation_history)} historical messages for patient {req.patient_id}")
-                        else:
-                            logger.info(f"History exists but no valid messages found for patient {req.patient_id}")
-                    else:
-                        logger.info(f"No conversation history found for patient {req.patient_id}")
-            except Exception as e:
-                logger.warning(f"Failed to load conversation history for patient {req.patient_id}: {e}")
-                # Continue without history rather than failing
-                
-        # 如果需要添加上下文且有有效内容 with length management
-        if should_add_context and context_text.strip():
-            # Limit context length to prevent overwhelming the model
-            if len(context_text) > 2000:
-                context_text = context_text[:2000] + "...[内容过长已截断]"
-                logger.info(f"Truncated follow-up context to {len(context_text)} characters")
-            messages_to_send.append({"role": "user", "content": "/no_think " + context_text})
-            
-        # 验证并添加当前请求的新消息
-        if req.messages:
-            for msg in req.messages:
-                if (isinstance(msg, dict) and 
-                    isinstance(msg.get("role"), str) and
-                    isinstance(msg.get("content"), str) and
-                    msg.get("role") == "user" and 
-                    msg.get("content", "").strip()):
-                    # Add /no_think tag to user messages for DeepSeek model
-                    content = msg.get("content", "").strip()
-                    if not content.startswith("/no_think"):
-                        content = "/no_think " + content
-                    messages_to_send.append({"role": "user", "content": content})
-                elif isinstance(msg, dict):
-                    logger.warning(f"Invalid message format: role='{msg.get('role')}', content type={type(msg.get('content'))}, content length={len(str(msg.get('content', '')))}")
+    if context_text.strip():
+        if len(context_text) > 2000:
+            context_text = context_text[:2000] + "...[内容过长已截断]"
+            logger.info(f"Trimmed context to {len(context_text)} characters before sending")
+        messages_to_send.append({"role": "user", "content": "/no_think " + context_text})
+
+    if not is_initial_update and req.messages:
+        for msg in req.messages:
+            if not isinstance(msg, dict):
+                continue
+
+            role = msg.get("role")
+            content = msg.get("content")
+
+            if not isinstance(role, str) or not isinstance(content, str) or not content.strip():
+                logger.warning(
+                    "Invalid message format: role='%s', content type=%s, content length=%s",
+                    role,
+                    type(content),
+                    len(str(content or ""))
+                )
+                continue
+
+            cleaned = content.strip()
+            if role == "user":
+                if not cleaned.startswith("/no_think"):
+                    cleaned = "/no_think " + cleaned
+                messages_to_send.append({"role": "user", "content": cleaned})
+            elif role == "assistant":
+                messages_to_send.append({"role": "assistant", "content": cleaned})
+            elif role == "system":
+                # Rare but allow explicit system injections from client
+                messages_to_send.append({"role": "system", "content": cleaned})
+            else:
+                logger.warning("Unsupported message role '%s' ignored", role)
 
     # 验证消息列表不为空
     if not messages_to_send:
@@ -1651,24 +1454,6 @@ async def llm_chat_stream(req: LLMChatRequest):
     
     logger.info("=" * 80)
 
-    # 获取最后一个用户消息用于持久化
-    last_user = ""
-    if is_initial_update:
-        last_user = context_text
-    else:
-        # 从当前请求中获取最新的用户消息
-        if req.messages:
-            for m in reversed(req.messages):
-                if isinstance(m, dict) and m.get("role") == "user" and m.get("content", "").strip():
-                    # Store original message without /no_think tag for persistence
-                    original_content = m.get("content", "")
-                    last_user = original_content.replace("/no_think ", "").strip() if original_content.startswith("/no_think ") else original_content
-                    break
-        
-        # 如果没有找到用户消息，记录警告
-        if not last_user:
-            logger.warning(f"No user message found in request for persistence. Messages: {req.messages}")
-
     # 缓存助手回复内容
     assistant_buf: List[str] = []
 
@@ -1693,8 +1478,7 @@ async def llm_chat_stream(req: LLMChatRequest):
         timeout = httpx.Timeout(120.0, read=120.0)
         last_exception: Optional[Exception] = None
 
-        try:
-            for attempt in range(1, OLLAMA_MAX_RETRIES + 1):
+        for attempt in range(1, OLLAMA_MAX_RETRIES + 1):
                 logger.info(
                     "Starting OLLAMA streaming attempt %s/%s for patient %s",
                     attempt,
@@ -1837,44 +1621,21 @@ async def llm_chat_stream(req: LLMChatRequest):
                     )
                     await asyncio.sleep(OLLAMA_RETRY_DELAY_SECONDS)
 
-            if not assistant_buf:
-                if last_exception:
-                    logger.error(
-                        "OLLAMA streaming failed after %s attempts: %s",
-                        OLLAMA_MAX_RETRIES,
-                        last_exception
-                    )
-                    yield f"\n[OLLAMA **错误**] {str(last_exception)}\n"
-                else:
-                    logger.warning(
-                        "OLLAMA streaming produced no content after %s attempts without explicit exception",
-                        OLLAMA_MAX_RETRIES
-                    )
-                    yield "\n[LLM warning] 模型未返回内容，请稍后重试或检查日志。\n"
-                return
-
-        finally:
-            # 只有当有assistant回复且需要持久化时才保存
-            if req.persist and req.patient_id and assistant_buf and last_user:
-                try:
-                    full_response = "".join(assistant_buf)
-                    logger.info(f"Persisting LLM context for patient {req.patient_id}, response length: {len(full_response)}")
-                    
-                    persist_llm_context(
-                        req.patient_id,
-                        system_prompt="",  # 不再使用system_prompt持久化
-                        context_text="",   # 不再单独存储context_text
-                        user_prompt=last_user,
-                        assistant_text=full_response,
-                        reset=bool(req.reset),
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to persist LLM context for patient {req.patient_id}: {e}")
-            elif req.persist and req.patient_id:
-                if not assistant_buf:
-                    logger.warning(f"No assistant response to persist for patient {req.patient_id}")
-                if not last_user:
-                    logger.warning(f"No user message to persist for patient {req.patient_id}")
+        if not assistant_buf:
+            if last_exception:
+                logger.error(
+                    "OLLAMA streaming failed after %s attempts: %s",
+                    OLLAMA_MAX_RETRIES,
+                    last_exception
+                )
+                yield f"\n[OLLAMA **错误**] {str(last_exception)}\n"
+            else:
+                logger.warning(
+                    "OLLAMA streaming produced no content after %s attempts without explicit exception",
+                    OLLAMA_MAX_RETRIES
+                )
+                yield "\n[LLM warning] 模型未返回内容，请稍后重试或检查日志。\n"
+            return
 
     return StreamingResponse(ollama_stream(), media_type="text/plain; charset=utf-8")
 
