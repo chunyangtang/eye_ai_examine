@@ -17,7 +17,7 @@ const renderMarkdownContent = (content) => {
     const items = block
       .trimEnd()
       .split('\n')
-      .map(line => line.replace(/^\s*[-*+]\s+(.+)$/, '<li class="mb-1">• $1</li>'))
+      .map(line => line.replace(/^\s*[-*+]\s+(.+)$/, '<li class="mb-1">$1</li>'))
       .join('');
     return `${p1}<ul class="list-disc pl-5 my-2">${items}</ul>\n`;
   });
@@ -1080,6 +1080,14 @@ function App() {
       category: 'macular',
       color: 'text-teal-600'
     },
+    其它眼底病变: {
+      chinese: '其它眼底病变',
+      english: 'Other Fundus Diseases',
+      fullName: '其它眼底病变 (Other Fundus Diseases)',
+      shortName: 'Other Fundus',
+      category: 'fundus',
+      color: 'text-teal-700'
+    },
     白内障: { 
       chinese: '白内障', 
       english: 'Cataract',
@@ -1125,10 +1133,10 @@ function App() {
       shortName: 'PM'
     },
     高度近视: { 
-      chinese: '高度近视', 
-      english: 'High Myopia',
-      fullName: '高度近视 (High Myopia)',
-      shortName: 'HM'
+      chinese: '豹纹状眼底', 
+      english: 'Leopard Fundus',
+      fullName: '豹纹状眼底 (Leopard Fundus)',
+      shortName: 'Leopard Fundus'
     },
     RVO: { 
       chinese: '视网膜静脉阻塞', 
@@ -1147,18 +1155,6 @@ function App() {
       english: 'Retinal Detachment',
       fullName: '视网膜脱离 (Retinal Detachment)',
       shortName: 'RD'
-    },
-    其它视网膜病: { 
-      chinese: '其它视网膜病', 
-      english: 'Other Retinal Diseases',
-      fullName: '其它视网膜病 (Other Retinal)',
-      shortName: 'Other Retinal'
-    },
-    其它黄斑病变: { 
-      chinese: '其它黄斑病变', 
-      english: 'Other Macular Diseases',
-      fullName: '其它黄斑病变 (Other Macular)',
-      shortName: 'Other Macular'
     },
     白内障: { 
       chinese: '白内障', 
@@ -1185,6 +1181,10 @@ function App() {
     '青光眼','糖网','AMD','病理性近视','RVO','RAO','视网膜脱离','其它视网膜病','其它黄斑病变','白内障','正常'
   ];
 
+  const summaryMergeGroups = [
+    { key: '其它眼底病变', members: ['其它视网膜病', '其它黄斑病变'] }
+  ];
+
   // Map raw probability p (0-1) to visual width so that threshold t maps to 0.5
   // Linear piecewise: [0,t] -> [0,0.5], [t,1] -> [0.5,1]. This keeps monotonicity.
   const mapProbToWidth = (p, t) => {
@@ -1198,33 +1198,59 @@ function App() {
 
   const formatProb = (p) => (p === undefined || p === null ? '--' : p.toFixed(2));
 
+  const getSummaryRankingItems = (eyeKey) => {
+    const preds = patientData?.prediction_results?.[eyeKey];
+    const thresholds = patientData?.prediction_thresholds || {};
+    if (!preds) return [];
+
+    const rawItems = diseaseOrder.map((dk) => {
+      const p = preds[dk] ?? 0;
+      const t = thresholds[dk] ?? 0.5;
+      return {
+        key: dk,
+        sourceKey: dk,
+        p,
+        t,
+        score: mapProbToWidth(p, t),
+      };
+    });
+
+    const rawMap = new Map(rawItems.map((item) => [item.key, item]));
+    const skipped = new Set();
+    const merged = [];
+
+    summaryMergeGroups.forEach((group) => {
+      const candidates = group.members
+        .map((member) => rawMap.get(member))
+        .filter(Boolean);
+      if (candidates.length > 0) {
+        const best = candidates.reduce((acc, curr) => (curr.score > acc.score ? curr : acc));
+        merged.push({ ...best, key: group.key, sourceKey: best.key });
+        candidates.forEach((item) => skipped.add(item.key));
+      }
+    });
+
+    rawItems.forEach((item) => {
+      if (!skipped.has(item.key)) {
+        merged.push(item);
+      }
+    });
+
+    merged.sort((a, b) => b.score - a.score);
+    return merged;
+  };
+
   // Helper function to deep compare two objects
   const isDataEqual = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
   // Build a natural Chinese summary per eye; skip '正常' in secondary mentions
   const buildEyeSummary = (eyeKey) => {
     try {
-      const preds = patientData?.prediction_results?.[eyeKey];
-      const thresholds = patientData?.prediction_thresholds || {};
-      if (!preds) return '';
-
+      const ranked = getSummaryRankingItems(eyeKey);
+      if (ranked.length === 0) return '';
       const eyeLabel = eyeKey === 'left_eye' ? '左眼' : '右眼';
-
-      // Build array of { key, p, t, score } where score is threshold-remapped probability
-      const items = diseaseOrder.map((dk) => {
-        const p = preds[dk] ?? 0;
-        const t = thresholds[dk] ?? 0.5;
-        return {
-          key: dk,
-          p,
-          t,
-          score: mapProbToWidth(p, t),
-        };
-      });
-
-  // Sort by remapped score desc (threshold at 0.5)
-  items.sort((a, b) => b.score - a.score);
-      const [top, ...rest] = items;
+      const topThree = ranked.slice(0, 3);
+      const [top] = topThree;
       if (!top) return '';
 
       const topName = diseaseInfo[top.key]?.chinese || top.key;
@@ -1240,10 +1266,9 @@ function App() {
 
       // If top is 正常, use a more natural normal-first sentence
       if (top.key === '正常') {
-        const others = rest
-          .filter((x) => x.key !== '正常' && (x.p ?? 0) >= 0.2 * (x.t ?? 0.5))
-          .sort((a, b) => b.score - a.score)
-          .slice(0, 2)
+        const others = topThree
+          .slice(1)
+          .filter((x) => x.key !== '正常' && (x.p ?? 0) >= 0.2 * (x.t ?? 0.5) && x.score > 0)
           .map((x) => diseaseInfo[x.key]?.chinese || x.key);
 
         if (others.length === 0) {
@@ -1256,10 +1281,9 @@ function App() {
       }
 
       // Build secondary mentions, skipping '正常'
-      const others = rest
-        .filter((x) => x.key !== '正常' && (x.p ?? 0) >= 0.2 * (x.t ?? 0.5))
-        .sort((a, b) => b.score - a.score)
-        .slice(0, 2)
+      const others = topThree
+        .slice(1)
+        .filter((x) => x.key !== '正常' && (x.p ?? 0) >= 0.2 * (x.t ?? 0.5) && x.score > 0)
         .map((x) => diseaseInfo[x.key]?.chinese || x.key);
 
       // Main sentence
@@ -1285,63 +1309,27 @@ function App() {
   // - Primaries: all diseases crossing threshold (p >= t); if '正常' crosses, show only '正常'
   // - Secondaries: up to 2 diseases (exclude '正常' and primaries) crossing half-threshold (p >= 0.5*t)
   const getEyeHighlights = (eyeKey) => {
-    const preds = patientData?.prediction_results?.[eyeKey];
-    const thresholds = patientData?.prediction_thresholds || {};
-    if (!preds) return { primaries: [], secondaries: [] };
+    const ranked = getSummaryRankingItems(eyeKey);
+    if (ranked.length === 0) return { primaries: [], secondaries: [] };
 
-    const items = diseaseOrder.map((dk) => {
-      const p = preds[dk] ?? 0;
-      const t = thresholds[dk] ?? 0.5;
-      return { key: dk, p, t, score: mapProbToWidth(p, t) };
-    });
+    const topThree = ranked.slice(0, 3);
 
-    // Helper to enrich an item for UI
-    const enrich = (x) => ({
-      key: x.key,
-      name: diseaseInfo[x.key]?.chinese || x.key,
-      p: x.p,
-      t: x.t,
-      status: x.key === '正常'
+    const enrich = (item) => ({
+      key: item.key,
+      name: diseaseInfo[item.key]?.chinese || item.key,
+      p: item.p,
+      t: item.t,
+      status: item.key === '正常'
         ? '正常'
-        : (x.p >= x.t * 1.2 ? '明显偏高' : (x.p >= x.t ? '较高' : (x.p >= x.t * 0.8 ? '接近阈值' : '较低')))
+        : (item.p >= item.t * 1.2 ? '明显偏高' : (item.p >= item.t ? '较高' : (item.p >= item.t * 0.8 ? '接近阈值' : '较低')))
     });
 
-    // Sort once by remapped score desc
-    items.sort((a, b) => b.score - a.score);
-
-    const above = items.filter((x) => (x.p ?? 0) >= (x.t ?? 0.5));
-
-    let primaries = [];
-    let secondaries = [];
-
-    if (above.length > 0) {
-      // If Normal is above threshold, only show Normal as primary, but still allow secondaries
-      const normalIdx = above.findIndex((x) => x.key === '正常');
-      if (normalIdx !== -1) {
-        primaries = [enrich(above[normalIdx])];
-        secondaries = items
-          .filter((x) => x.key !== '正常' && (x.p ?? 0) >= 0.5 * (x.t ?? 0.5))
-          .sort((a, b) => b.score - a.score)
-          .slice(0, 2)
-          .map(enrich);
-      } else {
-        primaries = above.map(enrich);
-        secondaries = items
-          .filter((x) => x.key !== '正常' && !above.find((a) => a.key === x.key) && (x.p ?? 0) >= 0.5 * (x.t ?? 0.5))
-          .sort((a, b) => b.score - a.score)
-          .slice(0, 2)
-          .map(enrich);
-      }
-    } else {
-      // No disease above threshold: pick the top candidate as primary
-      const [top] = items;
-      if (top) primaries = [enrich(top)];
-      secondaries = items
-        .filter((x) => x.key !== '正常' && (!top || x.key !== top.key) && (x.p ?? 0) >= 0.5 * (x.t ?? 0.5))
-        .sort((a, b) => b.score - a.score)
-        .slice(0, 2)
-        .map(enrich);
-    }
+    const primaryItem = topThree[0];
+    const primaries = primaryItem ? [enrich(primaryItem)] : [];
+    const secondaries = topThree
+      .slice(1)
+      .filter((item) => item.key !== '正常' && item.score > 0)
+      .map(enrich);
 
     return { primaries, secondaries };
   };
@@ -1433,9 +1421,38 @@ function App() {
       setHasUnsavedChanges(false); // Reset unsaved changes flag
       
       // Initialize manual diagnosis states
+      const getPrimaryAIDisease = (data, eyeKey) => {
+        const preds = data?.prediction_results?.[eyeKey];
+        if (!preds) return null;
+
+        const thresholds = (data?.prediction_thresholds && data.prediction_thresholds) || {};
+        let best = null;
+
+        Object.entries(preds).forEach(([diseaseKey, probValue]) => {
+          if (!manualDiseaseInfo[diseaseKey]) return;
+          const threshold = typeof thresholds[diseaseKey] === 'number' ? thresholds[diseaseKey] : 0.5;
+          const prob = typeof probValue === 'number' ? probValue : 0;
+          const score = mapProbToWidth(prob, threshold || 0.5);
+
+          if (!best || score > best.score) {
+            best = { diseaseKey, score };
+          }
+        });
+
+        return best?.diseaseKey || null;
+      };
+
+      const buildInitialManualDiagnosis = (eyeKey) => {
+        const primaryDisease = getPrimaryAIDisease(result, eyeKey);
+        return Object.keys(manualDiseaseInfo).reduce((acc, diseaseKey) => {
+          acc[diseaseKey] = primaryDisease === diseaseKey;
+          return acc;
+        }, {});
+      };
+
       const initialManualDiagnosis = {
-        left_eye: Object.keys(manualDiseaseInfo).reduce((acc, key) => ({ ...acc, [key]: false }), {}),
-        right_eye: Object.keys(manualDiseaseInfo).reduce((acc, key) => ({ ...acc, [key]: false }), {})
+        left_eye: buildInitialManualDiagnosis('left_eye'),
+        right_eye: buildInitialManualDiagnosis('right_eye')
       };
       setManualDiagnosis(initialManualDiagnosis);
       setCustomDiseases({ left_eye: '', right_eye: '' });
@@ -2141,7 +2158,7 @@ function App() {
               </div>
             </div>
 
-            {/* Unified Interactive Correction Section (unchanged) */}
+            {/* Unified Interactive Correction Section */}
             <div className="mb-10 p-6 rounded-lg shadow-sm border border-gray-200 bg-white">
               <h3 className="text-xl font-semibold mb-2 text-gray-800 text-center">人工复检区 (Re-examination)</h3>
               <p className="text-xs text-gray-500 mb-5 text-center">在此对影像类型/质量与疾病诊断结果进行人工复核与修改 (Review & adjust image metadata and disease diagnoses)</p>
@@ -2153,7 +2170,8 @@ function App() {
                     const imgInfo = getDisplayedImageInfo(imageId);
                     if (!imgInfo) return null;
                     const typeOptions = ['--- Select ---', '左眼CFP', '右眼CFP', '左眼外眼照', '右眼外眼照'];
-                    const qualityOptions = ['--- Select ---', '图像质量高', '图像质量可用', '图像质量差'];
+                    const defaultQualityOption = '图像质量可用';
+                    const qualityOptions = [defaultQualityOption, '图像质量高', '图像质量差', '--- Select ---'];
                     return (
                       <div key={imgIndex} className="flex flex-col items-center gap-2 p-3 bg-gray-50 rounded-md border border-gray-200 flex-grow basis-0 min-w-[200px]">
                         <span className="font-medium text-gray-700 text-sm whitespace-nowrap">Image {imgIndex + 1}</span>
@@ -2168,7 +2186,7 @@ function App() {
                             ))}
                           </select>
                           <select
-                            value={imgInfo.quality}
+                            value={imgInfo.quality || defaultQualityOption}
                             onChange={(e) => handleImageDetailChange(imgInfo.id, 'quality', e.target.value)}
                             className="p-2 border border-gray-300 rounded-md bg-white text-gray-700 text-xs md:text-sm flex-grow focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-150 shadow-sm"
                           >
