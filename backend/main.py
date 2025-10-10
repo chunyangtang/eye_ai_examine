@@ -17,7 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
 from datatype import ImageInfo, EyeDiagnosis, PatientData, SubmitDiagnosisRequest, EyePrediction, EyePredictionThresholds, ManualDiagnosisData, UpdateSelectionRequest, AlterThresholdRequest
-from patientdataio import load_batch_patient_data, create_batch_dummy_patient_data
+from patientdataio import load_batch_patient_data, create_batch_dummy_patient_data, load_patient_from_record
 
 import logging
 
@@ -54,19 +54,133 @@ OLLAMA_RETRY_DELAY_SECONDS = max(0.0, float(os.getenv("LLM_RETRY_DELAY_SECONDS",
 OLLAMA_KEEP_ALIVE = os.getenv("LLM_KEEP_ALIVE", "30m")
 
 # Get data paths from environment variables
-RAW_JSON_PATH_ENV = os.getenv("RAW_JSON_PATH", "../data/inference_results.json")
-if not os.path.isabs(RAW_JSON_PATH_ENV):
-    RAW_JSON_PATH = os.path.normpath(os.path.join(os.path.dirname(__file__), RAW_JSON_PATH_ENV))
+RAW_JSON_ROOT_ENV = os.getenv("RAW_JSON_PATH", "../data")
+if not os.path.isabs(RAW_JSON_ROOT_ENV):
+    RAW_JSON_ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), RAW_JSON_ROOT_ENV))
 else:
-    RAW_JSON_PATH = RAW_JSON_PATH_ENV
+    RAW_JSON_ROOT = RAW_JSON_ROOT_ENV
 
-EXAMINE_RESULTS_PATH_ENV = os.getenv("EXAMINE_RESULTS_PATH", "../data/examine_results.json")
-if not os.path.isabs(EXAMINE_RESULTS_PATH_ENV):
-    EXAMINE_RESULTS_PATH = os.path.normpath(os.path.join(os.path.dirname(__file__), EXAMINE_RESULTS_PATH_ENV))
-else:
-    EXAMINE_RESULTS_PATH = EXAMINE_RESULTS_PATH_ENV
+RAW_JSON_MAX_DAYS = max(1, int(os.getenv("RAW_JSON_MAX_DAYS", "21")))
 
-INFERENCE_RESULTS_PATH = EXAMINE_RESULTS_PATH
+# EXAMINE_RESULTS_PATH_ENV = os.getenv("EXAMINE_RESULTS_PATH", "../data/examine_results.json")
+# if not os.path.isabs(EXAMINE_RESULTS_PATH_ENV):
+#     EXAMINE_RESULTS_PATH = os.path.normpath(os.path.join(os.path.dirname(__file__), EXAMINE_RESULTS_PATH_ENV))
+# else:
+#     EXAMINE_RESULTS_PATH = EXAMINE_RESULTS_PATH_ENV
+
+# INFERENCE_RESULTS_PATH = EXAMINE_RESULTS_PATH
+
+# --- Inference data aggregation (latest dated folders) ---
+_inference_cache_lock = threading.Lock()
+_inference_patient_records: Dict[str, Dict[str, Any]] = {}
+_inference_patient_base_dirs: Dict[str, str] = {}
+_inference_loaded_files: List[str] = []
+
+
+def _resolve_inference_sources() -> List[tuple]:
+    """Return a list of (json_path, base_dir, label) sorted by newest first."""
+    if os.path.isfile(RAW_JSON_ROOT):
+        return [(RAW_JSON_ROOT, os.path.dirname(RAW_JSON_ROOT), os.path.basename(RAW_JSON_ROOT))]
+
+    if not os.path.isdir(RAW_JSON_ROOT):
+        logger.error("RAW_JSON_ROOT does not exist or is not accessible: %s", RAW_JSON_ROOT)
+        return []
+
+    entries: List[tuple] = []
+    try:
+        for name in os.listdir(RAW_JSON_ROOT):
+            full_dir = os.path.join(RAW_JSON_ROOT, name)
+            if not os.path.isdir(full_dir):
+                continue
+            label = name.strip()
+            if len(label) == 8 and label.isdigit():
+                candidate = os.path.join(full_dir, "inference_results.json")
+                if os.path.isfile(candidate):
+                    entries.append((candidate, full_dir, label))
+    except Exception as exc:
+        logger.error("Failed to enumerate inference directories under %s: %s", RAW_JSON_ROOT, exc)
+        return []
+
+    if not entries:
+        # Fallback: look for inference_results.json directly under root for backwards compatibility
+        fallback = os.path.join(RAW_JSON_ROOT, "inference_results.json")
+        if os.path.isfile(fallback):
+            return [(fallback, RAW_JSON_ROOT, os.path.basename(RAW_JSON_ROOT))]
+        logger.warning("No dated inference folders found under %s", RAW_JSON_ROOT)
+        return []
+
+    # Sort by label descending (newest date first)
+    entries.sort(key=lambda item: item[2], reverse=True)
+    return entries[:RAW_JSON_MAX_DAYS]
+
+
+def _refresh_inference_cache(force: bool = False) -> None:
+    global _inference_patient_records, _inference_patient_base_dirs, _inference_loaded_files
+    sources = _resolve_inference_sources()
+    file_keys = [path for path, _, _ in sources]
+
+    with _inference_cache_lock:
+        if not force and file_keys == _inference_loaded_files and _inference_patient_records:
+            return
+
+        combined: Dict[str, Dict[str, Any]] = {}
+        base_dirs: Dict[str, str] = {}
+
+        for path, base_dir, label in sources:
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception as exc:
+                logger.error("Failed to load inference file %s: %s", path, exc)
+                continue
+
+            if not isinstance(data, dict):
+                logger.warning("Inference file %s did not contain a JSON object", path)
+                continue
+
+            for pid, payload in data.items():
+                if not isinstance(payload, dict):
+                    continue
+                combined[pid] = payload
+                base_dirs[pid] = base_dir
+
+        _inference_patient_records = combined
+        _inference_patient_base_dirs = base_dirs
+        _inference_loaded_files = file_keys
+
+        logger.info(
+            "Loaded %s inference file(s) covering %s patient(s)",
+            len(file_keys),
+            len(combined)
+        )
+
+
+def get_inference_patient_ids() -> List[str]:
+    _refresh_inference_cache()
+    with _inference_cache_lock:
+        return list(_inference_patient_records.keys())
+
+
+def get_inference_record(patient_id: str) -> Optional[Dict[str, Any]]:
+    _refresh_inference_cache()
+    with _inference_cache_lock:
+        record = _inference_patient_records.get(patient_id)
+        if not record:
+            return None
+        # Return a shallow copy to prevent accidental mutation
+        return dict(record)
+
+
+def get_inference_base_dir(patient_id: str) -> Optional[str]:
+    _refresh_inference_cache()
+    with _inference_cache_lock:
+        return _inference_patient_base_dirs.get(patient_id)
+
+
+def get_full_inference_map() -> Dict[str, Dict[str, Any]]:
+    _refresh_inference_cache()
+    with _inference_cache_lock:
+        return {pid: dict(payload) for pid, payload in _inference_patient_records.items()}
 
 # Path to questionnaire data from the other project
 CONSULTATION_DATA_PATH_ENV = os.getenv("CONSULTATION_DATA_PATH")
@@ -140,22 +254,12 @@ def _parse_ts_from_imgpath(p: str) -> int:
         return 0
 
 def _warm_raw_cache_from_raw_json(ris_exam_id: str) -> None:
-    """
-    Build raw_probs_cache[ris_exam_id] from RAW_JSON_PATH with new structure.
-    by_type: Dict[type, List[image_dict]] (each image dict augmented with 'probs' = diseases)
-    by_id:   Dict[img_id, Dict[disease->prob]]
-    """
-    if not os.path.exists(RAW_JSON_PATH):
-        raise FileNotFoundError("RAW file not found")
+    """Build raw_probs_cache[ris_exam_id] from aggregated inference records."""
+    record = get_inference_record(ris_exam_id)
+    if record is None:
+        raise KeyError(f"Patient {ris_exam_id} not found in inference cache")
 
-    with open(RAW_JSON_PATH, "r", encoding="utf-8") as f:
-        all_json = json.load(f)
-
-    raw_patient = all_json.get(ris_exam_id, {})
-    if not isinstance(raw_patient, dict):
-        raise KeyError("Invalid RAW patient entry")
-
-    images = raw_patient.get("images", [])
+    images = record.get("images", [])
     if not isinstance(images, list):
         images = []
 
@@ -214,8 +318,11 @@ async def get_patient_by_id(ris_exam_id: str):
         # Load from data source
         try:
             print(f"Loading patient {ris_exam_id} from data source...")
-            from patientdataio import load_single_patient_data
-            patient_data = load_single_patient_data(RAW_JSON_PATH, ris_exam_id)
+            record = get_inference_record(ris_exam_id)
+            if record is None:
+                raise KeyError
+            base_dir = get_inference_base_dir(ris_exam_id) or RAW_JSON_ROOT
+            patient_data = load_patient_from_record(ris_exam_id, record, base_dir)
             # Cache the loaded data
             patients_data_cache[ris_exam_id] = patient_data
             # Build raw prob cache for this patient (warm for reselection)
@@ -237,12 +344,9 @@ async def get_patient_by_id(ris_exam_id: str):
 async def get_available_patient_ids():
     """Returns a list of available patient IDs from the data source."""
     try:
-        # Only load the JSON keys, not the full data (read-only RAW file)
-        with open(RAW_JSON_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        patient_ids = list(data.keys())
-        print(f"Found {len(patient_ids)} available patients")
-        return {"patient_ids": patient_ids}
+        ids = get_inference_patient_ids()
+        print(f"Found {len(ids)} available patients")
+        return {"patient_ids": ids}
     except Exception as e:
         print(f"Error loading patient IDs: {e}")
         raise HTTPException(status_code=500, detail="Failed to load patient IDs")
@@ -662,7 +766,7 @@ def find_best_matching_consultation(all_data: List[Dict[str, Any]], patient_name
 # --- Helpers for patient context ---
 def _get_patient_context(ris_exam_id: str) -> Dict[str, Optional[str]]:
     """
-    Returns {'name': str|None, 'examineTime': str|None} from cache, else from RAW_JSON_PATH.
+    Returns {'name': str|None, 'examineTime': str|None} from cache, else from aggregated inference data.
     """
     ctx = {"name": None, "examineTime": None}
     try:
@@ -675,14 +779,12 @@ def _get_patient_context(ris_exam_id: str) -> Dict[str, Optional[str]]:
     except Exception:
         pass
 
-    # Fallback to read raw inference file
+    # Fallback to aggregated inference cache
     try:
-        with open(RAW_JSON_PATH, "r", encoding="utf-8") as f:
-            all_json = json.load(f)
-        raw = all_json.get(ris_exam_id, {})
-        if isinstance(raw, dict):
-            ctx["name"] = raw.get("name")
-            ctx["examineTime"] = raw.get("examineTime")
+        record = get_inference_record(ris_exam_id)
+        if isinstance(record, dict):
+            ctx["name"] = record.get("name")
+            ctx["examineTime"] = record.get("examineTime")
     except Exception:
         pass
     return ctx
@@ -1271,21 +1373,19 @@ def _build_context_placeholders(ris_exam_id: Optional[str]) -> Dict[str, str]:
     gender = getattr(p, "gender", None) if p and hasattr(p, "gender") else None
     examine_time = getattr(p, "examine_time", None) if p else None
     
-    # 如果患者数据中没有年龄和性别，尝试从推理结果文件中获取
-    if not age or not gender or not name:
+    # 如果患者数据中没有年龄和性别，尝试从推理结果缓存中获取
+    if not age or not gender or not name or not examine_time:
         try:
-            with open(RAW_JSON_PATH, 'r', encoding='utf-8') as f:
-                raw_data = json.load(f)
-                if ris_exam_id and ris_exam_id in raw_data:
-                    patient_info = raw_data[ris_exam_id]
-                    if not age and "age" in patient_info:
-                        age = patient_info["age"]
-                    if not gender and "gender" in patient_info:
-                        gender = patient_info["gender"]
-                    if not name and "name" in patient_info:
-                        name = patient_info["name"]
-                    if not examine_time and "examineTime" in patient_info:
-                        examine_time = patient_info["examineTime"]
+            record = get_inference_record(ris_exam_id or "")
+            if isinstance(record, dict):
+                if not age and record.get("age") is not None:
+                    age = record.get("age")
+                if not gender and record.get("gender") is not None:
+                    gender = record.get("gender")
+                if not name and record.get("name"):
+                    name = record.get("name")
+                if not examine_time and record.get("examineTime"):
+                    examine_time = record.get("examineTime")
         except Exception as e:
             logger.warning(f"Failed to load additional patient info: {str(e)}")
 
