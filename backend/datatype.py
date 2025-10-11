@@ -148,7 +148,9 @@ class SubmitDiagnosisRequest(BaseModel):
 class UpdateSelectionRequest(BaseModel):
     patient_id: str
     selected_image_ids: List[str]
+    exam_date: Optional[str] = None  # Optional exam date (YYYYMMDD format)
     
 
 class AlterThresholdRequest(BaseModel):
     patient_id: str
+    exam_date: Optional[str] = None  # Optional exam date (YYYYMMDD format)

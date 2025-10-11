@@ -526,7 +526,7 @@ function App() {
   const leftAIContainerRef = useRef(null);
   const [chatCardHeightPx, setChatCardHeightPx] = useState(null);
 
-  // MOVE EARLIER: 在任何使用它的 useEffect 之前声明，避免 TDZ
+  // MOVE HERE: Declare autoStartRef BEFORE any code that uses it
   const autoStartRef = useRef({});
 
   // Add state for consultation info
@@ -547,6 +547,11 @@ function App() {
   // New state for threshold management
   const [activeThresholdSet, setActiveThresholdSet] = useState(0); // 0 for set 1, 1 for set 2
   const [isAlteringThreshold, setIsAlteringThreshold] = useState(false);
+
+  // New state for exam instance management
+  const [availableExamInstances, setAvailableExamInstances] = useState([]); // List of available exam dates
+  const [currentExamDate, setCurrentExamDate] = useState(null); // Currently selected exam date
+  const [isLoadingInstances, setIsLoadingInstances] = useState(false);
 
   // Build backend URL and patient id
   const backendHost = window.location.hostname;
@@ -661,6 +666,247 @@ function App() {
     }
   }, [currentPatientId, fetchConsultationInfo]);
 
+  // Fetch available exam instances for a patient - MOVED HERE to avoid TDZ error
+  const fetchExamInstances = useCallback(async (examId) => {
+    if (!examId) return;
+    
+    setIsLoadingInstances(true);
+    try {
+      const response = await fetch(`${backendUrl}/api/patients/${examId}/instances`);
+      if (!response.ok) {
+        throw new Error(`Failed to fetch exam instances: ${response.status}`);
+      }
+      const result = await response.json();
+      setAvailableExamInstances(result.instances || []);
+      // If we have instances and no current exam date is set, set it to the first (latest)
+      if (result.instances && result.instances.length > 0 && !currentExamDate) {
+        setCurrentExamDate(result.instances[0].exam_date);
+      }
+    } catch (err) {
+      console.error('Error fetching exam instances:', err);
+      setAvailableExamInstances([]);
+    } finally {
+      setIsLoadingInstances(false);
+    }
+  }, [backendUrl, currentExamDate]);
+
+  // Fetch patient data - MOVED HERE to avoid TDZ error
+  const fetchPatientData = useCallback(async (examId, examDate = null) => {
+    if (!examId) {
+      setError('No ris_exam_id provided in URL. Please add ?ris_exam_id=<exam_id> to the URL.');
+      setLoading(false);
+      return;
+    }
+
+    console.log(`Starting to fetch patient data for exam ID: ${examId}${examDate ? ` (date: ${examDate})` : ''}`);
+    const startTime = performance.now();
+    setLoading(true);
+    setError(null);
+
+    try {
+      // Build URL with optional exam_date parameter
+      const url = examDate 
+        ? `${backendUrl}/api/patients/${examId}?exam_date=${examDate}`
+        : `${backendUrl}/api/patients/${examId}`;
+      
+      console.log(`Fetching from: ${url}`);
+      const response = await fetch(url);
+      
+      if (!response.ok) {
+        if (response.status === 404) {
+          throw new Error(`Examination with ID ${examId} not found.`);
+        }
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      
+      const result = await response.json();
+      const fetchTime = performance.now() - startTime;
+      console.log(`Successfully fetched patient data in ${fetchTime.toFixed(2)}ms`);
+
+      // Store a pristine copy of the data for tracking changes.
+      const dataWithOriginal = { ...result, original: JSON.parse(JSON.stringify(result)) };
+
+      setPatientData(dataWithOriginal);
+      
+      // Set the active threshold set from patient data
+      setActiveThresholdSet(result.active_threshold_set || 0);
+
+      // Initialize the 4 display images in a fixed desired order with graceful fallback
+      const desiredOrder = ['左眼CFP', '右眼CFP', '左眼外眼照', '右眼外眼照'];
+      const allImages = Array.isArray(result.eye_images) ? result.eye_images : [];
+      const selectedIds = [];
+      const used = new Set();
+
+      // First pass: pick images matching desired types in order
+      for (const desiredType of desiredOrder) {
+        const match = allImages.find(img => img.type === desiredType && !used.has(img.id));
+        if (match) {
+          selectedIds.push(match.id);
+          used.add(match.id);
+        } else {
+          selectedIds.push(null);
+        }
+      }
+
+      // Fill null slots with any remaining images
+      for (let i = 0; i < selectedIds.length; i++) {
+        if (!selectedIds[i]) {
+          const fallback = allImages.find(img => !used.has(img.id));
+          if (fallback) {
+            selectedIds[i] = fallback.id;
+            used.add(fallback.id);
+          }
+        }
+      }
+
+      setSelectedDisplayImages(selectedIds.filter(id => id !== null));
+      setLoading(false);
+      setHasUnsavedChanges(false);
+
+      // Load manual diagnosis data if available, otherwise initialize with AI predictions
+      try {
+        const manualResp = await fetch(`${backendUrl}/api/manual_diagnosis/${examId}`);
+        let manualDataLoaded = false;
+        
+        if (manualResp.ok) {
+          const manualData = await manualResp.json();
+          
+          // Check if manual_diagnosis exists AND has actual data (not just empty objects)
+          const hasManualDiagnosisData = manualData.manual_diagnosis && (
+            (manualData.manual_diagnosis.left_eye && Object.keys(manualData.manual_diagnosis.left_eye).length > 0) ||
+            (manualData.manual_diagnosis.right_eye && Object.keys(manualData.manual_diagnosis.right_eye).length > 0)
+          );
+          
+          if (hasManualDiagnosisData) {
+            // Ensure the structure has left_eye and right_eye objects
+            const validatedDiagnosis = {
+              left_eye: manualData.manual_diagnosis.left_eye || {},
+              right_eye: manualData.manual_diagnosis.right_eye || {}
+            };
+            setManualDiagnosis(validatedDiagnosis);
+            manualDataLoaded = true;
+          }
+          if (manualData.custom_diseases) {
+            setCustomDiseases(manualData.custom_diseases);
+          }
+          if (manualData.diagnosis_notes) {
+            setDiagnosisNotes(manualData.diagnosis_notes);
+          }
+        }
+        
+        // If no saved manual diagnosis exists, initialize with AI predictions
+        if (!manualDataLoaded) {
+          // List of disease keys that should be checked in manual diagnosis
+          const diseaseKeys = ['青光眼', '糖网', 'AMD', '病理性近视', '高度近视', 'RVO', 'RAO', '视网膜脱离', '其它视网膜病', '其它黄斑病变', '白内障', '正常'];
+          
+          // Helper to calculate score (probability relative to threshold)
+          const calculateScore = (prob, threshold) => {
+            if (prob >= threshold * 2) return prob / (threshold * 2);
+            if (prob >= threshold) return 0.5 + (prob - threshold) / threshold * 0.3;
+            if (prob >= threshold * 0.5) return 0.2 + (prob - threshold * 0.5) / (threshold * 0.5) * 0.3;
+            return prob / (threshold * 0.5) * 0.2;
+          };
+          
+          const getPrimaryAIDisease = (data, eyeKey) => {
+            const preds = data?.prediction_results?.[eyeKey];
+            if (!preds) return null;
+
+            const thresholds = (data?.prediction_thresholds && data.prediction_thresholds) || {};
+            let best = null;
+
+            Object.entries(preds).forEach(([diseaseKey, probValue]) => {
+              // Only consider diseases in our manual disease list
+              if (!diseaseKeys.includes(diseaseKey)) return;
+              
+              const threshold = typeof thresholds[diseaseKey] === 'number' ? thresholds[diseaseKey] : 0.5;
+              const prob = typeof probValue === 'number' ? probValue : 0;
+              const score = calculateScore(prob, threshold);
+
+              if (!best || score > best.score) {
+                best = { diseaseKey, score };
+              }
+            });
+
+            return best?.diseaseKey || null;
+          };
+
+          const buildInitialManualDiagnosis = (eyeKey) => {
+            const primaryDisease = getPrimaryAIDisease(result, eyeKey);
+            return diseaseKeys.reduce((acc, diseaseKey) => {
+              acc[diseaseKey] = primaryDisease === diseaseKey;
+              return acc;
+            }, {});
+          };
+
+          const initialManualDiagnosis = {
+            left_eye: buildInitialManualDiagnosis('left_eye'),
+            right_eye: buildInitialManualDiagnosis('right_eye')
+          };
+          
+          console.log('Initializing manual diagnosis with AI predictions:', initialManualDiagnosis);
+          setManualDiagnosis(initialManualDiagnosis);
+          setCustomDiseases({ left_eye: '', right_eye: '' });
+          setDiagnosisNotes('');
+        }
+      } catch (e) {
+        console.warn('Failed to load manual diagnosis data:', e);
+        // Even if loading fails, try to initialize with AI predictions
+        const diseaseKeys = ['青光眼', '糖网', 'AMD', '病理性近视', '高度近视', 'RVO', 'RAO', '视网膜脱离', '其它视网膜病', '其它黄斑病变', '白内障', '正常'];
+        
+        const calculateScore = (prob, threshold) => {
+          if (prob >= threshold * 2) return prob / (threshold * 2);
+          if (prob >= threshold) return 0.5 + (prob - threshold) / threshold * 0.3;
+          if (prob >= threshold * 0.5) return 0.2 + (prob - threshold * 0.5) / (threshold * 0.5) * 0.3;
+          return prob / (threshold * 0.5) * 0.2;
+        };
+        
+        const getPrimaryAIDisease = (data, eyeKey) => {
+          const preds = data?.prediction_results?.[eyeKey];
+          if (!preds) return null;
+
+          const thresholds = (data?.prediction_thresholds && data.prediction_thresholds) || {};
+          let best = null;
+
+          Object.entries(preds).forEach(([diseaseKey, probValue]) => {
+            if (!diseaseKeys.includes(diseaseKey)) return;
+            const threshold = typeof thresholds[diseaseKey] === 'number' ? thresholds[diseaseKey] : 0.5;
+            const prob = typeof probValue === 'number' ? probValue : 0;
+            const score = calculateScore(prob, threshold);
+
+            if (!best || score > best.score) {
+              best = { diseaseKey, score };
+            }
+          });
+
+          return best?.diseaseKey || null;
+        };
+
+        const buildInitialManualDiagnosis = (eyeKey) => {
+          const primaryDisease = getPrimaryAIDisease(result, eyeKey);
+          return diseaseKeys.reduce((acc, diseaseKey) => {
+            acc[diseaseKey] = primaryDisease === diseaseKey;
+            return acc;
+          }, {});
+        };
+
+        const initialManualDiagnosis = {
+          left_eye: buildInitialManualDiagnosis('left_eye'),
+          right_eye: buildInitialManualDiagnosis('right_eye')
+        };
+        
+        console.log('Initializing manual diagnosis with AI predictions (from catch):', initialManualDiagnosis);
+        setManualDiagnosis(initialManualDiagnosis);
+        setCustomDiseases({ left_eye: '', right_eye: '' });
+        setDiagnosisNotes('');
+      }
+
+    } catch (error) {
+      console.error('Error fetching patient data:', error);
+      setError(error.message);
+      setLoading(false);
+    }
+  }, [backendUrl]);
+
   // 首次加载：取可用姓名列表
   useEffect(() => {
     fetchAvailablePatientNames();
@@ -681,6 +927,8 @@ function App() {
       } else {
         fetchConsultationInfo(risExamIdFromUrl);
       }
+      // Fetch exam instances first, then load patient data
+      fetchExamInstances(risExamIdFromUrl);
       fetchPatientData(risExamIdFromUrl);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -744,7 +992,10 @@ function App() {
       const response = await fetch(`${backendUrl}/api/alter_threshold`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ patient_id: currentExamId }),
+        body: JSON.stringify({ 
+          patient_id: currentExamId,
+          exam_date: currentExamDate || null
+        }),
       });
 
       if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
@@ -774,6 +1025,15 @@ function App() {
       setIsAlteringThreshold(false);
     }
   }, [backendUrl, currentExamId]);
+
+  // Handle switching exam dates
+  const handleExamDateSwitch = useCallback(async (examDate) => {
+    if (!currentExamId || examDate === currentExamDate) return;
+    
+    setCurrentExamDate(examDate);
+    // Reload patient data for the selected exam date
+    await fetchPatientData(currentExamId, examDate);
+  }, [currentExamId, currentExamDate, fetchPatientData]);
 
   // Load LLM prompts config (update_prompt)
   useEffect(() => {
@@ -1301,140 +1561,6 @@ function App() {
     return { primaries, secondaries };
   };
 
-  const fetchPatientData = useCallback(async (examId) => {
-    if (!examId) {
-      setError('No ris_exam_id provided in URL. Please add ?ris_exam_id=<exam_id> to the URL.');
-      setLoading(false);
-      return;
-    }
-
-    console.log(`Starting to fetch patient data for exam ID: ${examId}`);
-    const startTime = performance.now();
-    setLoading(true);
-    setError(null);
-
-    try {
-      console.log(`Fetching from: ${backendUrl}/api/patients/${examId}`);
-      const response = await fetch(`${backendUrl}/api/patients/${examId}`);
-      
-      if (!response.ok) {
-        if (response.status === 404) {
-          throw new Error(`Examination with ID ${examId} not found.`);
-        }
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-      
-      const result = await response.json();
-      const fetchTime = performance.now() - startTime;
-      console.log(`Successfully fetched patient data in ${fetchTime.toFixed(2)}ms`);
-
-      // Store a pristine copy of the data for tracking changes.
-      const dataWithOriginal = { ...result, original: JSON.parse(JSON.stringify(result)) };
-
-      setPatientData(dataWithOriginal);
-      
-      // Set the active threshold set from patient data
-      setActiveThresholdSet(result.active_threshold_set || 0);
-
-      // Initialize the 4 display images in a fixed desired order with graceful fallback
-      const desiredOrder = ['左眼CFP', '右眼CFP', '左眼外眼照', '右眼外眼照'];
-      const allImages = Array.isArray(result.eye_images) ? result.eye_images : [];
-      const selectedIds = [];
-      const used = new Set();
-
-      // First pass: pick images matching desired types in order
-      for (const type of desiredOrder) {
-        const match = allImages.find((img) => img.type === type && !used.has(img.id));
-        if (match) {
-          selectedIds.push(match.id);
-          used.add(match.id);
-        }
-      }
-
-      // Second pass: follow desired order again to fill additional images of those types
-      const desiredSet = new Set(desiredOrder);
-      const imagesByType = new Map();
-      for (const img of allImages) {
-        const t = img.type || '';
-        if (!imagesByType.has(t)) imagesByType.set(t, []);
-        imagesByType.get(t).push(img);
-      }
-
-      for (const type of desiredOrder) {
-        if (selectedIds.length >= 4) break;
-        const list = imagesByType.get(type) || [];
-        for (const img of list) {
-          if (selectedIds.length >= 4) break;
-          if (!used.has(img.id)) {
-            selectedIds.push(img.id);
-            used.add(img.id);
-          }
-        }
-      }
-
-      // Third pass: if still not enough, include any remaining images of other/unknown types (stable order)
-      if (selectedIds.length < 4) {
-        for (const img of allImages) {
-          if (selectedIds.length >= 4) break;
-          if (desiredSet.has(img.type)) continue;
-          if (!used.has(img.id)) {
-            selectedIds.push(img.id);
-            used.add(img.id);
-          }
-        }
-      }
-
-      setSelectedDisplayImages(selectedIds.slice(0, 4));
-      setHasUnsavedChanges(false); // Reset unsaved changes flag
-      
-      // Initialize manual diagnosis states
-      const getPrimaryAIDisease = (data, eyeKey) => {
-        const preds = data?.prediction_results?.[eyeKey];
-        if (!preds) return null;
-
-        const thresholds = (data?.prediction_thresholds && data.prediction_thresholds) || {};
-        let best = null;
-
-        Object.entries(preds).forEach(([diseaseKey, probValue]) => {
-          if (!manualDiseaseInfo[diseaseKey]) return;
-          const threshold = typeof thresholds[diseaseKey] === 'number' ? thresholds[diseaseKey] : 0.5;
-          const prob = typeof probValue === 'number' ? probValue : 0;
-          const score = mapProbToWidth(prob, threshold || 0.5);
-
-          if (!best || score > best.score) {
-            best = { diseaseKey, score };
-          }
-        });
-
-        return best?.diseaseKey || null;
-      };
-
-      const buildInitialManualDiagnosis = (eyeKey) => {
-        const primaryDisease = getPrimaryAIDisease(result, eyeKey);
-        return Object.keys(manualDiseaseInfo).reduce((acc, diseaseKey) => {
-          acc[diseaseKey] = primaryDisease === diseaseKey;
-          return acc;
-        }, {});
-      };
-
-      const initialManualDiagnosis = {
-        left_eye: buildInitialManualDiagnosis('left_eye'),
-        right_eye: buildInitialManualDiagnosis('right_eye')
-      };
-      setManualDiagnosis(initialManualDiagnosis);
-      setCustomDiseases({ left_eye: '', right_eye: '' });
-      setDiagnosisNotes('');
-      
-      console.log(`Patient data processing completed for ${examId}`);
-    } catch (e) {
-      const errorTime = performance.now() - startTime;
-      console.error(`Failed to fetch patient data after ${errorTime.toFixed(2)}ms:`, e);
-      setError(`Failed to load examination data: ${e.message}. Please check if the examination ID is correct and the server is running.`);
-    } finally {
-      setLoading(false);
-    }
-  }, [backendUrl]);
-
   // Handler for changes to Image Type or Image Quality dropdowns
   const handleImageDetailChange = (imageId, field, value) => {
     setPatientData(prevData => {
@@ -1452,8 +1578,8 @@ function App() {
     setManualDiagnosis(prevDiagnosis => ({
       ...prevDiagnosis,
       [eye]: {
-        ...prevDiagnosis[eye],
-        [disease]: !prevDiagnosis[eye][disease]
+        ...(prevDiagnosis?.[eye] || {}),
+        [disease]: !(prevDiagnosis?.[eye]?.[disease])
       }
     }));
     setHasUnsavedChanges(true);
@@ -1481,6 +1607,7 @@ function App() {
       const payload = {
         patient_id: patientData?.patient_id,
         selected_image_ids: newSelectedIds,
+        exam_date: currentExamDate || null,
       };
       const resp = await fetch(`${backendUrl}/api/update_selection`, {
         method: 'POST',
@@ -1722,6 +1849,29 @@ function App() {
                 <span className="text-sm text-gray-500">
                   {patientIdPrefix}<span className="text-blue-700 font-bold">{currentExamId || 'No ID'}</span>
                 </span>
+                
+                {/* Exam Date Switcher - shown only when multiple instances available */}
+                {availableExamInstances.length > 1 && (
+                  <div className="flex items-center gap-2 ml-4 px-3 py-1 bg-yellow-50 border border-yellow-300 rounded-md">
+                    <span className="text-xs font-medium text-gray-600">检查日期:</span>
+                    <select
+                      value={currentExamDate || ''}
+                      onChange={(e) => handleExamDateSwitch(e.target.value)}
+                      className="text-sm border border-gray-300 rounded px-2 py-1 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      disabled={isLoadingInstances}
+                    >
+                      {availableExamInstances.map((instance) => (
+                        <option key={instance.exam_date} value={instance.exam_date}>
+                          {instance.exam_date} {instance.exam_date === availableExamInstances[0].exam_date ? '(最新)' : ''}
+                        </option>
+                      ))}
+                    </select>
+                    <span className="text-xs text-gray-500">
+                      共 {availableExamInstances.length} 次检查
+                    </span>
+                  </div>
+                )}
+                
                 <div className="flex items-center gap-2">
                   <input
                     type="text"
@@ -2180,7 +2330,7 @@ function App() {
                         <label key={disease} className="flex items-center space-x-2">
                           <input
                             type="checkbox"
-                            checked={manualDiagnosis.left_eye[disease] || false}
+                            checked={(manualDiagnosis?.left_eye?.[disease]) || false}
                             onChange={() => handleManualDiagnosisToggle('left_eye', disease)}
                             className="form-checkbox h-4 w-4 text-blue-600"
                           />
@@ -2196,7 +2346,7 @@ function App() {
                         </label>
                         <input
                           type="text"
-                          value={customDiseases.left_eye || ''}
+                          value={customDiseases?.left_eye || ''}
                           onChange={(e) => handleCustomDiseaseChange('left_eye', e.target.value)}
                           placeholder="输入其他疾病 / Enter custom disease"
                           className="w-full px-2 py-1 border border-gray-300 rounded-md text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
@@ -2213,7 +2363,7 @@ function App() {
                         <label key={disease} className="flex items-center space-x-2">
                           <input
                             type="checkbox"
-                            checked={manualDiagnosis.right_eye[disease] || false}
+                            checked={(manualDiagnosis?.right_eye?.[disease]) || false}
                             onChange={() => handleManualDiagnosisToggle('right_eye', disease)}
                             className="form-checkbox h-4 w-4 text-green-600"
                           />
@@ -2229,7 +2379,7 @@ function App() {
                         </label>
                         <input
                           type="text"
-                          value={customDiseases.right_eye || ''}
+                          value={customDiseases?.right_eye || ''}
                           onChange={(e) => handleCustomDiseaseChange('right_eye', e.target.value)}
                           placeholder="输入其他疾病 / Enter custom disease"
                           className="w-full px-2 py-1 border border-gray-300 rounded-md text-xs focus:outline-none focus:ring-1 focus:ring-green-500"

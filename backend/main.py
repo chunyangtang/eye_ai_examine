@@ -139,8 +139,9 @@ INFERENCE_RESULTS_PATH = EXAMINE_RESULTS_PATH
 
 # --- Inference data aggregation (latest dated folders) ---
 _inference_cache_lock = threading.Lock()
-_inference_patient_records: Dict[str, Dict[str, Any]] = {}
-_inference_patient_base_dirs: Dict[str, str] = {}
+# Changed to support multiple instances per patient: Dict[patient_id, List[instance]]
+# Each instance is a dict with keys: 'data', 'source_date', 'source_file', 'base_dir'
+_inference_patient_records: Dict[str, List[Dict[str, Any]]] = {}
 _inference_loaded_files: List[str] = []
 
 
@@ -182,7 +183,7 @@ def _resolve_inference_sources() -> List[tuple]:
 
 
 def _refresh_inference_cache(force: bool = False) -> None:
-    global _inference_patient_records, _inference_patient_base_dirs, _inference_loaded_files
+    global _inference_patient_records, _inference_loaded_files
     sources = _resolve_inference_sources()
     file_keys = [path for path, _, _ in sources]
 
@@ -190,8 +191,8 @@ def _refresh_inference_cache(force: bool = False) -> None:
         if not force and file_keys == _inference_loaded_files and _inference_patient_records:
             return
 
-        combined: Dict[str, Dict[str, Any]] = {}
-        base_dirs: Dict[str, str] = {}
+        # Build multi-instance structure: patient_id -> list of exam instances
+        combined: Dict[str, List[Dict[str, Any]]] = {}
 
         for path, base_dir, label in sources:
             try:
@@ -208,46 +209,121 @@ def _refresh_inference_cache(force: bool = False) -> None:
             for pid, payload in data.items():
                 if not isinstance(payload, dict):
                     continue
-                combined[pid] = payload
-                base_dirs[pid] = base_dir
+                
+                # Create instance metadata wrapper
+                instance = {
+                    "data": payload,
+                    "source_date": label,  # The dated folder name (YYYYMMDD)
+                    "source_file": path,
+                    "base_dir": base_dir
+                }
+                
+                # Append to patient's instance list
+                if pid not in combined:
+                    combined[pid] = []
+                combined[pid].append(instance)
+
+        # Sort each patient's instances by source_date descending (newest first)
+        for pid in combined:
+            combined[pid].sort(key=lambda x: x["source_date"], reverse=True)
 
         _inference_patient_records = combined
-        _inference_patient_base_dirs = base_dirs
         _inference_loaded_files = file_keys
 
+        total_instances = sum(len(instances) for instances in combined.values())
         logger.info(
-            "Loaded %s inference file(s) covering %s patient(s)",
+            "Loaded %s inference file(s) covering %s patient(s) with %s total exam instance(s)",
             len(file_keys),
-            len(combined)
+            len(combined),
+            total_instances
         )
 
 
 def get_inference_patient_ids() -> List[str]:
+    """Return list of all patient IDs that have at least one exam instance."""
     _refresh_inference_cache()
     with _inference_cache_lock:
         return list(_inference_patient_records.keys())
 
 
-def get_inference_record(patient_id: str) -> Optional[Dict[str, Any]]:
+def get_inference_record(patient_id: str, exam_date: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """
+    Get inference record for a patient.
+    If exam_date is provided, return that specific instance; otherwise return latest.
+    Returns the raw data payload (not the metadata wrapper).
+    """
     _refresh_inference_cache()
     with _inference_cache_lock:
-        record = _inference_patient_records.get(patient_id)
-        if not record:
+        instances = _inference_patient_records.get(patient_id)
+        if not instances:
             return None
-        # Return a shallow copy to prevent accidental mutation
-        return dict(record)
+        
+        # If specific exam_date requested, find matching instance
+        if exam_date:
+            for instance in instances:
+                if instance["source_date"] == exam_date:
+                    return dict(instance["data"])
+            return None  # No match found
+        
+        # Return latest (first in sorted list)
+        return dict(instances[0]["data"])
 
 
-def get_inference_base_dir(patient_id: str) -> Optional[str]:
+def get_inference_base_dir(patient_id: str, exam_date: Optional[str] = None) -> Optional[str]:
+    """
+    Get base directory for a patient's exam instance.
+    If exam_date is provided, return that specific instance's base_dir; otherwise return latest.
+    """
     _refresh_inference_cache()
     with _inference_cache_lock:
-        return _inference_patient_base_dirs.get(patient_id)
+        instances = _inference_patient_records.get(patient_id)
+        if not instances:
+            return None
+        
+        # If specific exam_date requested, find matching instance
+        if exam_date:
+            for instance in instances:
+                if instance["source_date"] == exam_date:
+                    return instance["base_dir"]
+            return None
+        
+        # Return latest
+        return instances[0]["base_dir"]
+
+
+def get_inference_instances(patient_id: str) -> List[Dict[str, str]]:
+    """
+    Get list of all exam instances for a patient.
+    Returns list of metadata dicts with keys: source_date, source_file
+    """
+    _refresh_inference_cache()
+    with _inference_cache_lock:
+        instances = _inference_patient_records.get(patient_id)
+        if not instances:
+            return []
+        
+        # Return lightweight metadata (don't include full data payload)
+        return [
+            {
+                "exam_date": inst["source_date"],
+                "source_file": inst["source_file"]
+            }
+            for inst in instances
+        ]
 
 
 def get_full_inference_map() -> Dict[str, Dict[str, Any]]:
+    """
+    Get all patient records (latest instance for each patient).
+    Maintained for backwards compatibility.
+    """
     _refresh_inference_cache()
     with _inference_cache_lock:
-        return {pid: dict(payload) for pid, payload in _inference_patient_records.items()}
+        return {
+            pid: dict(instances[0]["data"])
+            for pid, instances in _inference_patient_records.items()
+            if instances
+        }
 
 # Path to questionnaire data from the other project
 CONSULTATION_DATA_PATH_ENV = os.getenv("CONSULTATION_DATA_PATH")
@@ -320,9 +396,9 @@ def _parse_ts_from_imgpath(p: str) -> int:
     except Exception:
         return 0
 
-def _warm_raw_cache_from_raw_json(ris_exam_id: str) -> None:
+def _warm_raw_cache_from_raw_json(ris_exam_id: str, exam_date: Optional[str] = None) -> None:
     """Build raw_probs_cache[ris_exam_id] from aggregated inference records."""
-    record = get_inference_record(ris_exam_id)
+    record = get_inference_record(ris_exam_id, exam_date)
     if record is None:
         raise KeyError(f"Patient {ris_exam_id} not found in inference cache")
 
@@ -342,8 +418,9 @@ def _warm_raw_cache_from_raw_json(ris_exam_id: str) -> None:
 
         probs = _extract_disease_probs(img)
 
-        # cache by id
-        img_id = f"img_{ris_exam_id}_{img.get('img_path', '')}"
+        # cache by id - include exam_date in key if specified
+        cache_key = f"{ris_exam_id}_{exam_date}" if exam_date else ris_exam_id
+        img_id = f"img_{cache_key}_{img.get('img_path', '')}"
         raw_by_id[img_id] = probs
 
         # push into type list; augment with 'probs' for fallback users
@@ -359,52 +436,61 @@ def _warm_raw_cache_from_raw_json(ris_exam_id: str) -> None:
             reverse=True
         )
 
-    raw_probs_cache[ris_exam_id] = {"by_type": raw_by_type, "by_id": raw_by_id}
+    # Use composite key for cache if exam_date specified
+    cache_key = f"{ris_exam_id}_{exam_date}" if exam_date else ris_exam_id
+    raw_probs_cache[cache_key] = {"by_type": raw_by_type, "by_id": raw_by_id}
 
 # No preloading - data will be loaded on-demand
 
 # --- API Endpoints ---
 @app.get("/api/patients/{ris_exam_id}")
-async def get_patient_by_id(ris_exam_id: str):
-    """Returns the data for a specific patient by ris_exam_id (patient_id)."""
+async def get_patient_by_id(ris_exam_id: str, exam_date: Optional[str] = None):
+    """
+    Returns the data for a specific patient by ris_exam_id (patient_id).
+    Optional exam_date parameter to load a specific exam instance (format: YYYYMMDD).
+    If not provided, returns the latest exam instance.
+    """
     import time
     start_time = time.time()
     
+    # Create cache key that includes exam_date if specified
+    cache_key = f"{ris_exam_id}_{exam_date}" if exam_date else ris_exam_id
+    
     with patient_data_lock:
         # Check cache first
-        if ris_exam_id in patients_data_cache:
-            print(f"Serving cached data for patient: {ris_exam_id} (took {time.time() - start_time:.2f}s)")
+        if cache_key in patients_data_cache:
+            print(f"Serving cached data for patient: {cache_key} (took {time.time() - start_time:.2f}s)")
             # Warm raw prob cache if missing
-            if ris_exam_id not in raw_probs_cache:
+            if cache_key not in raw_probs_cache:
                 try:
-                    _warm_raw_cache_from_raw_json(ris_exam_id)
+                    _warm_raw_cache_from_raw_json(ris_exam_id, exam_date)
                 except Exception:
                     pass
-            return patients_data_cache[ris_exam_id]
+            return patients_data_cache[cache_key]
         
         # Load from data source
         try:
-            print(f"Loading patient {ris_exam_id} from data source...")
-            record = get_inference_record(ris_exam_id)
+            print(f"Loading patient {cache_key} from data source...")
+            record = get_inference_record(ris_exam_id, exam_date)
             if record is None:
                 raise KeyError
-            base_dir = get_inference_base_dir(ris_exam_id) or RAW_JSON_ROOT
+            base_dir = get_inference_base_dir(ris_exam_id, exam_date) or RAW_JSON_ROOT
             patient_data = load_patient_from_record(ris_exam_id, record, base_dir)
-            # Cache the loaded data
-            patients_data_cache[ris_exam_id] = patient_data
+            # Cache the loaded data with composite key
+            patients_data_cache[cache_key] = patient_data
             # Build raw prob cache for this patient (warm for reselection)
             try:
-                _warm_raw_cache_from_raw_json(ris_exam_id)
+                _warm_raw_cache_from_raw_json(ris_exam_id, exam_date)
             except Exception:
                 pass
             elapsed = time.time() - start_time
-            print(f"Loaded and cached data for patient: {ris_exam_id} (took {elapsed:.2f}s)")
+            print(f"Loaded and cached data for patient: {cache_key} (took {elapsed:.2f}s)")
             return patient_data
         except KeyError:
-            print(f"Patient {ris_exam_id} not found (took {time.time() - start_time:.2f}s)")
-            raise HTTPException(status_code=404, detail=f"Patient {ris_exam_id} not found")
+            print(f"Patient {cache_key} not found (took {time.time() - start_time:.2f}s)")
+            raise HTTPException(status_code=404, detail=f"Patient {ris_exam_id} (exam_date={exam_date}) not found")
         except Exception as e:
-            print(f"Error loading patient {ris_exam_id}: {e} (took {time.time() - start_time:.2f}s)")
+            print(f"Error loading patient {cache_key}: {e} (took {time.time() - start_time:.2f}s)")
             raise HTTPException(status_code=500, detail="Failed to load patient data")
 
 @app.get("/api/patients")
@@ -417,6 +503,23 @@ async def get_available_patient_ids():
     except Exception as e:
         print(f"Error loading patient IDs: {e}")
         raise HTTPException(status_code=500, detail="Failed to load patient IDs")
+
+@app.get("/api/patients/{ris_exam_id}/instances")
+async def get_patient_exam_instances(ris_exam_id: str):
+    """
+    Returns all available exam instances for a specific patient.
+    Returns list of exam dates sorted by newest first.
+    """
+    try:
+        instances = get_inference_instances(ris_exam_id)
+        if not instances:
+            raise HTTPException(status_code=404, detail=f"Patient {ris_exam_id} not found")
+        return {"patient_id": ris_exam_id, "instances": instances}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error loading exam instances for {ris_exam_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to load exam instances")
 
 @app.post("/api/submit_diagnosis")
 async def submit_diagnosis(request: SubmitDiagnosisRequest):
@@ -489,10 +592,13 @@ async def update_selection(request: UpdateSelectionRequest):
     - If selected images don't include a type, fallback to any available for that type; else use zeros for missing.
     - Update thresholds for cataract when 外眼 is used.
     """
+    # Create cache key that includes exam_date if specified
+    cache_key = f"{request.patient_id}_{request.exam_date}" if request.exam_date else request.patient_id
+    
     with patient_data_lock:
-        patient = patients_data_cache.get(request.patient_id)
+        patient = patients_data_cache.get(cache_key)
         if not patient:
-            raise HTTPException(status_code=404, detail=f"Patient {request.patient_id} not found in cache. Load patient data first.")
+            raise HTTPException(status_code=404, detail=f"Patient {cache_key} not found in cache. Load patient data first.")
 
         # Build maps for quick lookup
         selected_set = set(request.selected_image_ids or [])
@@ -510,15 +616,16 @@ async def update_selection(request: UpdateSelectionRequest):
 
         # We need access to original JSON probs to recompute.
         # Prefer in-memory cache to avoid disk IO; ensure it's present.
-        if request.patient_id not in raw_probs_cache:
+        raw_cache_key = cache_key
+        if raw_cache_key not in raw_probs_cache:
             # Try to warm the cache quickly from disk (RAW v2)
             try:
-                _warm_raw_cache_from_raw_json(request.patient_id)
+                _warm_raw_cache_from_raw_json(request.patient_id, request.exam_date)
             except Exception:
                 raise HTTPException(status_code=501, detail="Recompute not supported without source data")
 
-        raw_by_type = raw_probs_cache[request.patient_id]["by_type"]
-        raw_by_id = raw_probs_cache[request.patient_id]["by_id"]
+        raw_by_type = raw_probs_cache[raw_cache_key]["by_type"]
+        raw_by_id = raw_probs_cache[raw_cache_key]["by_id"]
 
         # Fallback: get the latest image's probs for a given type
         def extract_probs_by_type(desired_type: str):
@@ -672,10 +779,13 @@ async def alter_threshold(request: AlterThresholdRequest):
     """
     Cycles between different threshold sets for a patient and recomputes diagnosis results.
     """
+    # Create cache key that includes exam_date if specified
+    cache_key = f"{request.patient_id}_{request.exam_date}" if request.exam_date else request.patient_id
+    
     with patient_data_lock:
-        patient = patients_data_cache.get(request.patient_id)
+        patient = patients_data_cache.get(cache_key)
         if not patient:
-            raise HTTPException(status_code=404, detail=f"Patient {request.patient_id} not found in cache.")
+            raise HTTPException(status_code=404, detail=f"Patient {cache_key} not found in cache.")
         
         # Cycle to the next threshold set (0 -> 1, 1 -> 0)
         current_set = getattr(patient, 'active_threshold_set', 0)
