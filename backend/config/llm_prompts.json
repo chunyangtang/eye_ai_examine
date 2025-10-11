@@ -2,5 +2,5 @@
   "system_prompt": "你是一位专业的眼科医生，回答应简洁专业，尽量避免用药建议。",
   "update_prompt": "基于提供的患者信息，直接给出临床分析和建议，分为两部分：1）临床推理过程 2）意见摘要",
   "include_patient_context": true,
-  "context_template": "一名患者年龄{age}岁，以下是问诊要点：{consultation_summary}\n，我们的AI工具辅助诊断该患者左右眼疾病的概率结果如下：左眼：{ai_left_summary}；右眼：{ai_right_summary}。\n\n现在请你根据这些信息，给出该患者的临床分析和建议，一共包含两部分：1）临床推理过程 2）意见摘要"
+  "context_template": "一名患者年龄{age}岁，以下是问诊要点：{consultation_summary}，\n我们的AI工具辅助诊断该患者左右眼疾病的概率结果如下：左眼：{ai_left_summary}；右眼：{ai_right_summary}。\n\n现在请你根据这些信息，给出该患者的临床分析和建议，一共包含两部分：1）临床推理过程 2）意见摘要"
 }

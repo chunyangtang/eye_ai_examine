@@ -7,7 +7,7 @@ import datetime
 from dotenv import load_dotenv
 import httpx
 import threading
-from typing import List, Dict, Any, Optional, Union
+from typing import List, Dict, Any, Optional, Union, Tuple
 from pydantic import BaseModel
 from pathlib import Path
 
@@ -16,7 +16,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
-from datatype import ImageInfo, EyeDiagnosis, PatientData, SubmitDiagnosisRequest, EyePrediction, EyePredictionThresholds, ManualDiagnosisData, UpdateSelectionRequest, AlterThresholdRequest
+from datatype import ImageInfo, EyeDiagnosis, PatientData, SubmitDiagnosisRequest, EyePrediction, EyePredictionThresholds, ManualDiagnosisData, UpdateSelectionRequest, AlterThresholdRequest, CustomDiseases
 from patientdataio import load_batch_patient_data, create_batch_dummy_patient_data, load_patient_from_record
 
 import logging
@@ -44,6 +44,71 @@ patients_data_cache: Dict[str, PatientData] = {}
 manual_diagnosis_storage: Dict[str, ManualDiagnosisData] = {}
 # Cache of raw per-image probabilities to avoid disk I/O on reselection
 raw_probs_cache: Dict[str, Dict[str, Any]] = {}
+manual_diagnosis_file_lock = threading.Lock()
+def _load_manual_diagnosis_store() -> Dict[str, Any]:
+    """Read persisted manual diagnosis information keyed by patient id."""
+    if not os.path.exists(EXAMINE_RESULTS_PATH):
+        return {}
+    try:
+        with open(EXAMINE_RESULTS_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data
+        logger.warning("Manual diagnosis file %s did not contain a dict; resetting", EXAMINE_RESULTS_PATH)
+    except json.JSONDecodeError:
+        logger.error("Manual diagnosis file %s is not valid JSON; ignoring", EXAMINE_RESULTS_PATH)
+    except Exception as exc:
+        logger.error("Failed to load manual diagnosis file %s: %s", EXAMINE_RESULTS_PATH, exc)
+    return {}
+
+
+def _save_manual_diagnosis_store(serializable: Dict[str, Any]) -> None:
+    """Persist manual diagnosis storage to JSON file."""
+    os.makedirs(os.path.dirname(EXAMINE_RESULTS_PATH), exist_ok=True)
+    tmp_path = EXAMINE_RESULTS_PATH + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(serializable, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, EXAMINE_RESULTS_PATH)
+    except Exception as exc:
+        logger.error("Failed to save manual diagnosis data to %s: %s", EXAMINE_RESULTS_PATH, exc)
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+
+
+def _preload_manual_diagnoses() -> None:
+    """Populate in-memory manual diagnosis cache from persisted JSON file."""
+    try:
+        persisted = _load_manual_diagnosis_store()
+    except Exception as exc:
+        logger.error("Unable to preload manual diagnoses: %s", exc)
+        persisted = {}
+
+    if not isinstance(persisted, dict):
+        logger.warning("Preloaded manual diagnosis data is not a dict; skipping preload")
+        return
+
+    for patient_id, payload in persisted.items():
+        if not isinstance(payload, dict):
+            continue
+        try:
+            manual_diagnosis_storage[patient_id] = ManualDiagnosisData(**payload)
+        except Exception:
+            try:
+                from datatype import CustomDiseases
+                manual_diagnosis_storage[patient_id] = ManualDiagnosisData(
+                    manual_diagnosis=payload.get("manual_diagnosis", {}),
+                    custom_diseases=payload.get("custom_diseases") or CustomDiseases(),
+                    diagnosis_notes=payload.get("diagnosis_notes", "")
+                )
+            except Exception as inner_exc:
+                logger.error("Failed to deserialize manual diagnosis for %s: %s", patient_id, inner_exc)
+
+
+_preload_manual_diagnoses()
 
 # Limit the amount of conversation history we replay to the model each turn
 MAX_CHAT_HISTORY_MESSAGES = int(os.getenv("LLM_MAX_HISTORY_MESSAGES", "20"))
@@ -62,13 +127,15 @@ else:
 
 RAW_JSON_MAX_DAYS = max(1, int(os.getenv("RAW_JSON_MAX_DAYS", "21")))
 
-# EXAMINE_RESULTS_PATH_ENV = os.getenv("EXAMINE_RESULTS_PATH", "../data/examine_results.json")
-# if not os.path.isabs(EXAMINE_RESULTS_PATH_ENV):
-#     EXAMINE_RESULTS_PATH = os.path.normpath(os.path.join(os.path.dirname(__file__), EXAMINE_RESULTS_PATH_ENV))
-# else:
-#     EXAMINE_RESULTS_PATH = EXAMINE_RESULTS_PATH_ENV
+EXAMINE_RESULTS_PATH_ENV = os.getenv("EXAMINE_RESULTS_PATH", "../data/examine_results.json")
+if not os.path.isabs(EXAMINE_RESULTS_PATH_ENV):
+    EXAMINE_RESULTS_PATH = os.path.normpath(
+        os.path.join(os.path.dirname(__file__), EXAMINE_RESULTS_PATH_ENV)
+    )
+else:
+    EXAMINE_RESULTS_PATH = EXAMINE_RESULTS_PATH_ENV
 
-# INFERENCE_RESULTS_PATH = EXAMINE_RESULTS_PATH
+INFERENCE_RESULTS_PATH = EXAMINE_RESULTS_PATH
 
 # --- Inference data aggregation (latest dated folders) ---
 _inference_cache_lock = threading.Lock()
@@ -366,15 +433,36 @@ async def submit_diagnosis(request: SubmitDiagnosisRequest):
         
         # Store manual diagnosis data
         if request.manual_diagnosis or request.custom_diseases or request.diagnosis_notes:
-            from datatype import ManualDiagnosisData, CustomDiseases
+            # Convert raw dict to ManualEyeDiagnosis objects
+            processed_manual_diagnosis = {}
+            if request.manual_diagnosis:
+                from datatype import ManualEyeDiagnosis
+                for eye_key, eye_data in request.manual_diagnosis.items():
+                    if isinstance(eye_data, dict):
+                        # Create ManualEyeDiagnosis from dict, filling missing fields with False
+                        processed_manual_diagnosis[eye_key] = ManualEyeDiagnosis(**eye_data)
+                    else:
+                        processed_manual_diagnosis[eye_key] = eye_data
             
             manual_data = ManualDiagnosisData(
-                manual_diagnosis=request.manual_diagnosis or {},
+                manual_diagnosis=processed_manual_diagnosis,
                 custom_diseases=request.custom_diseases or CustomDiseases(),
                 diagnosis_notes=request.diagnosis_notes or ""
             )
             
             manual_diagnosis_storage[request.patient_id] = manual_data
+            with manual_diagnosis_file_lock:
+                persisted = _load_manual_diagnosis_store()
+                try:
+                    payload = manual_data.dict()
+                except Exception:
+                    payload = {
+                        "manual_diagnosis": manual_data.manual_diagnosis,
+                        "custom_diseases": getattr(manual_data, "custom_diseases", {}),
+                        "diagnosis_notes": getattr(manual_data, "diagnosis_notes", "")
+                    }
+                persisted[request.patient_id] = payload
+                _save_manual_diagnosis_store(persisted)
             print(f"Manual diagnosis data stored for patient: {request.patient_id}")
             print(f"Manual diagnosis: {manual_data.manual_diagnosis}")
             print(f"Custom diseases: {manual_data.custom_diseases}")
@@ -694,6 +782,29 @@ def normalize_consultation_text(entry: Dict[str, Any]) -> Dict[str, Any]:
                 eye["accompanyingSymptoms"] = _to_text(eye.get("accompanyingSymptoms"))
     return entry
 
+
+def _find_consultation_by_exam_id(all_data: List[Dict[str, Any]], ris_exam_id: Optional[str]) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """Locate a consultation entry (refined preferred) linked to a specific ris_exam_id.
+
+    Returns (matched_consultation, base_entry) where base_entry is the original list item
+    containing the consultation (useful for fallback metadata such as submissionTime).
+    """
+    if not ris_exam_id:
+        return None, None
+
+    for entry in all_data or []:
+        if not isinstance(entry, dict):
+            continue
+
+        refined = entry.get("refined")
+        if isinstance(refined, dict) and refined.get("_exam_ris_exam_id") == ris_exam_id:
+            return refined, entry
+
+        if entry.get("_exam_ris_exam_id") == ris_exam_id:
+            return entry, entry
+
+    return None, None
+
 def _parse_iso_to_aware_dt(s: Optional[str]) -> Optional[datetime.datetime]:
     """
     Parse ISO string into a timezone-aware datetime.
@@ -787,54 +898,102 @@ def _get_patient_context(ris_exam_id: str) -> Dict[str, Optional[str]]:
             ctx["examineTime"] = record.get("examineTime")
     except Exception:
         pass
+
+    if not ctx["name"] or not ctx["examineTime"]:
+        try:
+            with consultation_data_lock:
+                all_cons = load_consultation_data()
+                matched, base_entry = _find_consultation_by_exam_id(all_cons, ris_exam_id)
+            source = matched or base_entry
+            if isinstance(source, dict):
+                if not ctx["name"] and source.get("name"):
+                    ctx["name"] = source.get("name")
+                if not ctx["examineTime"]:
+                    ctx["examineTime"] = source.get("examineTime") or source.get("submissionTime")
+        except Exception:
+            pass
     return ctx
+
+def _resolve_consultation_time(entry: Dict[str, Any]) -> Optional[datetime.datetime]:
+    """Prefer refined timestamps, fallback to base submissionTime."""
+    if not isinstance(entry, dict):
+        return None
+
+    refined = entry.get("refined")
+    if isinstance(refined, dict):
+        for key in ("refinedTime", "submissionTime"):
+            dt = _parse_iso_to_aware_dt(refined.get(key))
+            if dt:
+                return dt.astimezone(datetime.timezone.utc)
+
+    dt = _parse_iso_to_aware_dt(entry.get("submissionTime"))
+    if dt:
+        return dt.astimezone(datetime.timezone.utc)
+    return None
+
 
 def _find_best_matching_index(all_data: List[Dict[str, Any]], patient_name: Optional[str], exam_time: Optional[str]) -> Optional[int]:
     """
     Same selection rule as find_best_matching_consultation, but returns index in list.
-    Prefers submissionTime <= examTime (closest), else earliest after.
+    Prefers submission/refined time <= examTime (closest), else earliest after.
+    Matches strictly by the provided patient_name (including refined name field).
     """
-    if not patient_name or not isinstance(all_data, list) or len(all_data) == 0:
+    normalized_name = (patient_name or "").strip()
+    if not normalized_name or not isinstance(all_data, list) or len(all_data) == 0:
         return None
 
     exam_dt = _parse_iso_to_aware_dt(exam_time)
     exam_utc = exam_dt.astimezone(datetime.timezone.utc) if exam_dt else None
 
-    # filter name
-    name_idxs = [(i, x) for i, x in enumerate(all_data) if isinstance(x, dict) and x.get("name") == patient_name]
+    name_idxs: List[Tuple[int, Dict[str, Any]]] = []
+    for i, entry in enumerate(all_data):
+        if not isinstance(entry, dict):
+            continue
+        entry_names: List[str] = []
+        base_name = entry.get("name")
+        if base_name:
+            entry_names.append(str(base_name).strip())
+        refined = entry.get("refined")
+        if isinstance(refined, dict):
+            refined_name = refined.get("name")
+            if refined_name:
+                entry_names.append(str(refined_name).strip())
+
+        if normalized_name and normalized_name in entry_names:
+            name_idxs.append((i, entry))
+
     if not name_idxs:
         return None
 
     if not exam_utc:
-        # no exam time -> pick latest by submissionTime
-        def time_key(x):
-            st = _parse_iso_to_aware_dt(x.get("submissionTime"))
-            return (st.astimezone(datetime.timezone.utc) if st else datetime.datetime.min.replace(tzinfo=datetime.timezone.utc))
+        # no exam time -> pick latest by available timestamps
+        def time_key(entry: Dict[str, Any]):
+            dt = _resolve_consultation_time(entry)
+            return dt if dt else datetime.datetime.min.replace(tzinfo=datetime.timezone.utc)
+
         name_idxs.sort(key=lambda t: time_key(t[1]))
         return name_idxs[-1][0]
 
     # before or equal to exam (closest)
-    candidates = []
-    for i, x in name_idxs:
-        st = _parse_iso_to_aware_dt(x.get("submissionTime"))
-        if not st:
+    candidates: List[Tuple[int, datetime.datetime]] = []
+    for idx, entry in name_idxs:
+        st_utc = _resolve_consultation_time(entry)
+        if not st_utc:
             continue
-        st_utc = st.astimezone(datetime.timezone.utc)
         if st_utc <= exam_utc:
-            candidates.append((i, st_utc))
+            candidates.append((idx, st_utc))
     if candidates:
         candidates.sort(key=lambda t: (exam_utc - t[1]))
         return candidates[0][0]
 
     # earliest after exam
-    after = []
-    for i, x in name_idxs:
-        st = _parse_iso_to_aware_dt(x.get("submissionTime"))
-        if not st:
+    after: List[Tuple[int, datetime.datetime]] = []
+    for idx, entry in name_idxs:
+        st_utc = _resolve_consultation_time(entry)
+        if not st_utc:
             continue
-        st_utc = st.astimezone(datetime.timezone.utc)
         if st_utc > exam_utc:
-            after.append((i, st_utc))
+            after.append((idx, st_utc))
     if after:
         after.sort(key=lambda t: (t[1] - exam_utc))
         return after[0][0]
@@ -1389,30 +1548,63 @@ def _build_context_placeholders(ris_exam_id: Optional[str]) -> Dict[str, str]:
         except Exception as e:
             logger.warning(f"Failed to load additional patient info: {str(e)}")
 
+    ctx = _get_patient_context(ris_exam_id or "")
+
     # 从问诊数据中获取年龄和性别信息（优先级更高，因为这是用户填写的最新信息）
+    cons: Optional[Dict[str, Any]] = None
+    base_entry: Optional[Dict[str, Any]] = None
+    search_name = (ctx.get("name") or name or "").strip()
+    search_time = ctx.get("examineTime") or examine_time
+
+    def _merge_consultation(base: Optional[Dict[str, Any]], refined: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        keys_to_preserve = [
+            "name",
+            "age",
+            "gender",
+            "phone",
+            "affectedArea",
+            "leftEye",
+            "rightEye",
+            "bothEyes",
+            "submissionTime",
+            "examineTime",
+        ]
+        merged: Dict[str, Any] = {}
+        if isinstance(base, dict):
+            for key in keys_to_preserve:
+                if base.get(key) is not None:
+                    merged[key] = base.get(key)
+        if isinstance(refined, dict):
+            merged.update(refined)
+        if search_name and not merged.get("name"):
+            merged["name"] = search_name
+        return merged
+
     with consultation_data_lock:
         cons_all = load_consultation_data()
-        ctx = _get_patient_context(ris_exam_id or "")
-        idx = _find_best_matching_index(cons_all, ctx.get("name") or name, ctx.get("examineTime") or examine_time)
-        cons = None
-        
-        if idx is not None:
-            base = cons_all[idx]
-            refined = base.get("refined")
-            # 优先使用refined数据，否则使用原始数据
-            if isinstance(refined, dict):
-                cons = refined
-            else:
-                cons = base
-        
-        # 从问诊数据中提取年龄和性别，如果存在的话
-        if cons:
-            if not age and cons.get("age"):
-                age = cons.get("age")
-            if not gender and cons.get("gender"):
-                gender = cons.get("gender")
-            if not name and cons.get("name"):
-                name = cons.get("name")
+        if search_name:
+            idx = _find_best_matching_index(cons_all, search_name, search_time)
+            if idx is not None:
+                base_entry = cons_all[idx]
+                refined = base_entry.get("refined") if isinstance(base_entry, dict) else None
+                cons = _merge_consultation(base_entry, refined)
+
+    if isinstance(cons, dict):
+        if not age and cons.get("age"):
+            age = cons.get("age")
+        if not gender and cons.get("gender"):
+            gender = cons.get("gender")
+        if not name and cons.get("name"):
+            name = cons.get("name")
+        if not examine_time:
+            examine_time = cons.get("examineTime") or cons.get("submissionTime")
+
+    if (not examine_time) and isinstance(base_entry, dict):
+        examine_time = (
+            base_entry.get("examineTime")
+            or base_entry.get("submissionTime")
+            or examine_time
+        )
 
     gender_zh = _zh_gender(gender)
 

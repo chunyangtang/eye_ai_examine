@@ -138,10 +138,10 @@ class PatientData(BaseModel):
 
 class SubmitDiagnosisRequest(BaseModel):
     patient_id: str
-    image_updates: List[Dict[str, str]] = None  # Only id, type, quality
-    # Manual diagnosis data
-    manual_diagnosis: Dict[str, ManualEyeDiagnosis] = None
-    custom_diseases: CustomDiseases = None
+    image_updates: Optional[List[Dict[str, str]]] = None  # Only id, type, quality
+    # Manual diagnosis data - accept raw dicts for flexibility
+    manual_diagnosis: Optional[Dict[str, Dict[str, bool]]] = None
+    custom_diseases: Optional[CustomDiseases] = None
     diagnosis_notes: str = ""
     
 
