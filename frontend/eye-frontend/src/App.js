@@ -230,29 +230,29 @@ const ConsultationInfoSection = ({ consultationData, onChange, onSubmit, isSubmi
   };
 
   const getEyeData = (eye) => {
-    if (!consultationData) return null;
-    if (eye === 'left') return consultationData.leftEye || null;
-    if (eye === 'right') return consultationData.rightEye || null;
-    if (eye === 'both') return consultationData.bothEyes || null;
+    if (!data) return null;
+    if (eye === 'left') return data.leftEye || null;
+    if (eye === 'right') return data.rightEye || null;
+    if (eye === 'both') return data.bothEyes || null;
     return null;
   };
 
   const handleChange = (field, value) => {
     if (!onChange) return;
-    onChange({ ...consultationData, [field]: value });
+    onChange({ ...data, [field]: value });
   };
 
   const handleEyeChange = (eye, field, value) => {
     if (!onChange) return;
     const eyeField = eye === 'left' ? 'leftEye' : eye === 'right' ? 'rightEye' : 'bothEyes';
-    const updatedEyeData = { ...(consultationData[eyeField] || {}), [field]: value };
-    onChange({ ...consultationData, [eyeField]: updatedEyeData });
+    const updatedEyeData = { ...(data[eyeField] || {}), [field]: value };
+    onChange({ ...data, [eyeField]: updatedEyeData });
   };
 
   // NEW: intelligent toggle that preserves and pre-fills data
   const toggleAffectedArea = (area) => {
-    const currentAreas = new Set(consultationData.affectedArea || []);
-    const nextData = { ...consultationData, affectedArea: Array.from(currentAreas) };
+    const currentAreas = new Set(data.affectedArea || []);
+    const nextData = { ...data, affectedArea: Array.from(currentAreas) };
 
     // Ensure fields exist but do NOT clear any existing data
     const leftField = 'leftEye';
@@ -297,14 +297,18 @@ const ConsultationInfoSection = ({ consultationData, onChange, onSubmit, isSubmi
     onChange(nextData);
   };
 
-  if (!consultationData) {
-    return (
-      <div className="bg-white rounded-lg shadow-md p-4 h-full">
-        <h3 className="text-lg font-semibold mb-4">问诊信息 (Consultation Info)</h3>
-        <p className="text-gray-500 italic">No consultation information available</p>
-      </div>
-    );
-  }
+  // Allow editing even when no data exists - create a fillable blank form
+  const data = consultationData || {
+    name: '',
+    age: '',
+    gender: '',
+    phone: '',
+    affectedArea: [],
+    leftEye: {},
+    rightEye: {},
+    bothEyes: {},
+    submissionTime: null
+  };
 
   return (
     <div className="bg-white rounded-lg shadow-md p-4 h-full overflow-y-auto">
@@ -323,6 +327,12 @@ const ConsultationInfoSection = ({ consultationData, onChange, onSubmit, isSubmi
         </button>
       </div>
       
+      {!consultationData && (
+        <div className="mb-3 p-2 bg-yellow-50 border border-yellow-200 rounded text-xs text-yellow-800">
+          <strong>提示：</strong>未找到已有问诊记录，可在此填写新的问诊信息
+        </div>
+      )}
+      
       <div className="space-y-4 text-sm">
         {/* Basic Info */}
         <div className="space-y-2">
@@ -330,8 +340,9 @@ const ConsultationInfoSection = ({ consultationData, onChange, onSubmit, isSubmi
             <span className="w-24 text-gray-600">姓名 (Name):</span>
             <input 
               type="text"
-              value={consultationData.name || ''}
+              value={data.name || ''}
               onChange={e => handleChange('name', e.target.value)}
+              placeholder="请输入姓名"
               className="flex-1 border-b border-gray-300 focus:outline-none focus:border-blue-500 px-1"
             />
           </div>
@@ -340,7 +351,7 @@ const ConsultationInfoSection = ({ consultationData, onChange, onSubmit, isSubmi
             <span className="w-24 text-gray-600">年龄 (Age):</span>
             <input
               type="text"
-              value={consultationData.age || ''}
+              value={data.age || ''}
               onChange={e => handleChange('age', e.target.value)}
               placeholder="例如 62"
               className="flex-1 border-b border-gray-300 focus:outline-none focus:border-blue-500 px-1"
@@ -351,7 +362,7 @@ const ConsultationInfoSection = ({ consultationData, onChange, onSubmit, isSubmi
             <span className="w-24 text-gray-600">性别 (Gender):</span>
             <input
               type="text"
-              value={toZhGender(consultationData.gender || '')}
+              value={toZhGender(data.gender || '')}
               onChange={e => handleChange('gender', e.target.value)}
               placeholder="男 / 女 / 其他"
               className="flex-1 border-b border-gray-300 focus:outline-none focus:border-blue-500 px-1"
@@ -362,8 +373,9 @@ const ConsultationInfoSection = ({ consultationData, onChange, onSubmit, isSubmi
             <span className="w-24 text-gray-600">电话 (Phone):</span>
             <input 
               type="text"
-              value={consultationData.phone || ''}
+              value={data.phone || ''}
               onChange={e => handleChange('phone', e.target.value)}
+              placeholder="请输入联系电话"
               className="flex-1 border-b border-gray-300 focus:outline-none focus:border-blue-500 px-1"
             />
           </div>
@@ -374,7 +386,7 @@ const ConsultationInfoSection = ({ consultationData, onChange, onSubmit, isSubmi
           <span className="block text-gray-600 font-medium mb-1">受累部位 (Affected Areas):</span>
           <div className="flex flex-wrap gap-3 pl-2">
             {['left', 'right', 'both'].map((area) => {
-              const isSelected = (consultationData.affectedArea || []).includes(area);
+              const isSelected = (data.affectedArea || []).includes(area);
               const areaLabel = area === 'left' ? '左眼 (Left Eye)' : 
                               area === 'right' ? '右眼 (Right Eye)' : 
                               '双眼 (Both Eyes)';
@@ -402,7 +414,7 @@ const ConsultationInfoSection = ({ consultationData, onChange, onSubmit, isSubmi
         {/* Eye-specific information */}
         {['left', 'right', 'both'].map(eye => {
           // Only show this eye section if it's in the affected areas
-          if (!(consultationData.affectedArea || []).includes(eye)) return null;
+          if (!(data.affectedArea || []).includes(eye)) return null;
           
           const eyeData = getEyeData(eye) || {};
           const eyeLabel = eye === 'left' ? '左眼 (Left Eye)' : 
@@ -482,7 +494,7 @@ const ConsultationInfoSection = ({ consultationData, onChange, onSubmit, isSubmi
         
         {/* Submission Time */}
         <div className="border-t border-gray-200 pt-2 text-xs text-gray-500">
-          提交时间 (Submission Time): {consultationData.submissionTime || 'N/A'}
+          提交时间 (Submission Time): {data.submissionTime ? new Date(data.submissionTime).toLocaleString('zh-CN') : '新建记录'}
         </div>
       </div>
     </div>
@@ -538,6 +550,7 @@ function App() {
   // 添加缺失的状态变量
   const [currentPatientId, setCurrentPatientId] = useState('');
   const [patientNameSearch, setPatientNameSearch] = useState('');
+  const [patientNameFromUrl, setPatientNameFromUrl] = useState(''); // Track patient_name from URL
   const [availablePatientNames, setAvailablePatientNames] = useState([]);
   const [showNameSuggestions, setShowNameSuggestions] = useState(false);
   const [sameNameConsultations, setSameNameConsultations] = useState([]);
@@ -639,7 +652,17 @@ function App() {
         setSameNameConsultations([]);
       } else {
         setConsultationData(null);
-        setConsultationDataEdited(null);
+        setConsultationDataEdited({
+          name: '',
+          age: '',
+          gender: '',
+          phone: '',
+          affectedArea: [],
+          leftEye: {},
+          rightEye: {},
+          bothEyes: {},
+          submissionTime: null
+        }); // Initialize with blank form when no consultation exists
         setShowConsultationSelector(false);
         setSameNameConsultations([]);
       }
@@ -923,8 +946,10 @@ function App() {
       if (patientNameFromUrl) {
         const decoded = decodeURIComponent(patientNameFromUrl);
         setPatientNameSearch(decoded);
+        setPatientNameFromUrl(decoded); // Store patient_name from URL
         fetchConsultationInfo(risExamIdFromUrl, decoded, true); // 同名多条时自动选最新
       } else {
+        setPatientNameFromUrl(''); // No patient_name in URL
         fetchConsultationInfo(risExamIdFromUrl);
       }
       // Fetch exam instances first, then load patient data
@@ -959,13 +984,26 @@ function App() {
     setConsultationSubmitMessage('');
 
     try {
+      // Prepare consultation data with proper name handling
+      const submissionData = { ...consultationDataEdited };
+      
+      // If creating new consultation and name is empty, use patient_name from URL or "未知患者"
+      if (!consultationData && !submissionData.name) {
+        submissionData.name = patientNameFromUrl || patientData?.name || '未知患者';
+      }
+      
+      // Add timestamp for new consultations
+      if (!consultationData) {
+        submissionData.submissionTime = new Date().toISOString();
+      }
+
       const response = await fetch(`${backendUrl}/api/consultation`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           patient_id: currentExamId,     // 兼容旧后端
           ris_exam_id: currentExamId,    // 兼容新后端
-          consultation_data: consultationDataEdited
+          consultation_data: submissionData
         }),
       });
 
@@ -973,7 +1011,8 @@ function App() {
 
       const result = await response.json();
       setConsultationSubmitMessage(result.status || 'Consultation data saved!');
-      setConsultationData(consultationDataEdited);
+      setConsultationData(submissionData);
+      setConsultationDataEdited(JSON.parse(JSON.stringify(submissionData)));
     } catch (e) {
       console.error("Failed to submit consultation data:", e);
       setConsultationSubmitMessage(`Error: ${e.message}`);
@@ -981,7 +1020,7 @@ function App() {
       setIsConsultationSubmitting(false);
       setTimeout(() => setConsultationSubmitMessage(''), 3000);
     }
-  }, [backendUrl, currentExamId, consultationDataEdited]);
+  }, [backendUrl, currentExamId, consultationDataEdited, consultationData, patientNameFromUrl, patientData]);
 
   // Handle alter threshold
   const handleAlterThreshold = useCallback(async () => {
