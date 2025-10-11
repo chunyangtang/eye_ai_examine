@@ -1422,6 +1422,18 @@ function App() {
       fullName: '视网膜脱离 (Retinal Detachment)',
       shortName: 'RD'
     },
+    其它视网膜病: { 
+      chinese: '其它视网膜病', 
+      english: 'Other Retinopathy',
+      fullName: '其它视网膜病 (Other Retinopathy)',
+      shortName: 'Other Retinal'
+    },
+    其它黄斑病变: { 
+      chinese: '其它黄斑病变', 
+      english: 'Other Maculopathy',
+      fullName: '其它黄斑病变 (Other Maculopathy)',
+      shortName: 'Other Macular'
+    },
     白内障: { 
       chinese: '白内障', 
       english: 'Cataract',
