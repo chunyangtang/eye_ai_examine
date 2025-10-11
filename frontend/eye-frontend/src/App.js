@@ -875,6 +875,7 @@ function App() {
     try {
       const payload = {
         patient_id: getCurrentPatientId(),
+        patient_name: patientNameSearch || null,  // Include patient_name for consultation matching
         messages: history,
       };
 

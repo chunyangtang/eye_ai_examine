@@ -1264,6 +1264,13 @@ def _format_prob(p: Optional[float]) -> str:
 def _summarize_consultation(cons: Optional[Dict[str, Any]]) -> str:
     if not cons or not isinstance(cons, dict):
         return "无"
+    
+    # Mapping for onset method codes to descriptive text
+    onset_mapping = {
+        "A": "突发性（数小时内迅速出现）",
+        "B": "渐进性（数天或更长时间缓慢加重）"
+    }
+    
     map_area = lambda a: "左眼" if a=="left" else ("右眼" if a=="right" else "双眼")
     areas = [map_area(a) for a in (cons.get("affectedArea") or [])]
     parts = []
@@ -1277,7 +1284,13 @@ def _summarize_consultation(cons: Optional[Dict[str, Any]]) -> str:
         mh = obj.get("medicalHistory")
         segs = []
         if ms: segs.append(f"主要：{ms}")
-        if om or ot: segs.append(f"起病：{(om or '')} {(' '+ot) if ot else ''}".strip())
+        if om or ot:
+            # Map onset method code to descriptive text
+            onset_desc = onset_mapping.get(om, om) if om else ""
+            time_desc = ot if ot else ""
+            combined = f"{onset_desc} {time_desc}".strip()
+            if combined:
+                segs.append(f"起病：{combined}")
         if ac: segs.append(f"伴随：{ac}")
         if mh: segs.append(f"病史：{mh}")
         return f"{label}（" + "；".join(segs) + "）" if segs else None
@@ -1523,7 +1536,14 @@ def _fallback_ai_summary(patient: Optional[PatientData], eye_key: str) -> str:
         logger.error(f"Fallback AI summary failed: {e}")
         return f"获取预测数据失败: {str(e)}"
 
-def _build_context_placeholders(ris_exam_id: Optional[str]) -> Dict[str, str]:
+def _build_context_placeholders(ris_exam_id: Optional[str], patient_name: Optional[str] = None) -> Dict[str, str]:
+    """
+    Build context placeholders for LLM prompts.
+    
+    Args:
+        ris_exam_id: Patient exam ID
+        patient_name: Optional patient name to prioritize for consultation matching (from URL param)
+    """
     p: Optional[PatientData] = patients_data_cache.get(ris_exam_id or "")
     
     # 从患者数据中获取基本信息
@@ -1553,8 +1573,13 @@ def _build_context_placeholders(ris_exam_id: Optional[str]) -> Dict[str, str]:
     # 从问诊数据中获取年龄和性别信息（优先级更高，因为这是用户填写的最新信息）
     cons: Optional[Dict[str, Any]] = None
     base_entry: Optional[Dict[str, Any]] = None
-    search_name = (ctx.get("name") or name or "").strip()
+    
+    # PRIORITY 1: Use patient_name from URL parameter if provided
+    # PRIORITY 2: Fall back to name from patient context or cached patient data
+    search_name = (patient_name or ctx.get("name") or name or "").strip()
     search_time = ctx.get("examineTime") or examine_time
+    
+    logger.info(f"Building context placeholders - ris_exam_id: {ris_exam_id}, patient_name param: {patient_name}, search_name: {search_name}")
 
     def _merge_consultation(base: Optional[Dict[str, Any]], refined: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         keys_to_preserve = [
@@ -1638,6 +1663,7 @@ def _fill_template(template: str, mapping: Dict[str, str]) -> str:
 # --- LLM chat (streaming) ---
 class LLMChatRequest(BaseModel):
     patient_id: Optional[str] = None
+    patient_name: Optional[str] = None  # Add patient_name parameter for consultation matching
     messages: List[Dict[str, str]]  # [{role:'user'|'assistant'|'system', content:str}]
 
 
@@ -1668,7 +1694,7 @@ async def llm_chat_stream(req: LLMChatRequest):
 
     context_text = ""
     if cfg.get("include_patient_context", True):
-        placeholders = _build_context_placeholders(req.patient_id)
+        placeholders = _build_context_placeholders(req.patient_id, req.patient_name)
         context_text = _fill_template(cfg.get("context_template", ""), placeholders)
 
         if is_initial_update:
