@@ -38,6 +38,25 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Get data paths from environment variables (must be defined before functions that use them)
+RAW_JSON_ROOT_ENV = os.getenv("RAW_JSON_PATH", "../data")
+if not os.path.isabs(RAW_JSON_ROOT_ENV):
+    RAW_JSON_ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), RAW_JSON_ROOT_ENV))
+else:
+    RAW_JSON_ROOT = RAW_JSON_ROOT_ENV
+
+RAW_JSON_MAX_DAYS = max(1, int(os.getenv("RAW_JSON_MAX_DAYS", "21")))
+
+EXAMINE_RESULTS_PATH_ENV = os.getenv("EXAMINE_RESULTS_PATH", "../data/examine_results.json")
+if not os.path.isabs(EXAMINE_RESULTS_PATH_ENV):
+    EXAMINE_RESULTS_PATH = os.path.normpath(
+        os.path.join(os.path.dirname(__file__), EXAMINE_RESULTS_PATH_ENV)
+    )
+else:
+    EXAMINE_RESULTS_PATH = EXAMINE_RESULTS_PATH_ENV
+
+INFERENCE_RESULTS_PATH = EXAMINE_RESULTS_PATH
+
 # --- Data Storage (In-memory cache) ---
 patients_data_cache: Dict[str, PatientData] = {}
 # Storage for manual diagnosis data (separate from AI predictions)
@@ -45,6 +64,7 @@ manual_diagnosis_storage: Dict[str, ManualDiagnosisData] = {}
 # Cache of raw per-image probabilities to avoid disk I/O on reselection
 raw_probs_cache: Dict[str, Dict[str, Any]] = {}
 manual_diagnosis_file_lock = threading.Lock()
+
 def _load_manual_diagnosis_store() -> Dict[str, Any]:
     """Read persisted manual diagnosis information keyed by patient id."""
     if not os.path.exists(EXAMINE_RESULTS_PATH):
@@ -117,25 +137,6 @@ MAX_CHAT_HISTORY_MESSAGES = int(os.getenv("LLM_MAX_HISTORY_MESSAGES", "20"))
 OLLAMA_MAX_RETRIES = max(1, int(os.getenv("LLM_MAX_RETRIES", "2")))
 OLLAMA_RETRY_DELAY_SECONDS = max(0.0, float(os.getenv("LLM_RETRY_DELAY_SECONDS", "1.0")))
 OLLAMA_KEEP_ALIVE = os.getenv("LLM_KEEP_ALIVE", "30m")
-
-# Get data paths from environment variables
-RAW_JSON_ROOT_ENV = os.getenv("RAW_JSON_PATH", "../data")
-if not os.path.isabs(RAW_JSON_ROOT_ENV):
-    RAW_JSON_ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), RAW_JSON_ROOT_ENV))
-else:
-    RAW_JSON_ROOT = RAW_JSON_ROOT_ENV
-
-RAW_JSON_MAX_DAYS = max(1, int(os.getenv("RAW_JSON_MAX_DAYS", "21")))
-
-EXAMINE_RESULTS_PATH_ENV = os.getenv("EXAMINE_RESULTS_PATH", "../data/examine_results.json")
-if not os.path.isabs(EXAMINE_RESULTS_PATH_ENV):
-    EXAMINE_RESULTS_PATH = os.path.normpath(
-        os.path.join(os.path.dirname(__file__), EXAMINE_RESULTS_PATH_ENV)
-    )
-else:
-    EXAMINE_RESULTS_PATH = EXAMINE_RESULTS_PATH_ENV
-
-INFERENCE_RESULTS_PATH = EXAMINE_RESULTS_PATH
 
 # --- Inference data aggregation (latest dated folders) ---
 _inference_cache_lock = threading.Lock()
