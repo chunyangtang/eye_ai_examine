@@ -1877,7 +1877,7 @@ function App() {
                         </option>
                       ))}
                     </select>
-                    {availableExamInstances.length > 1 && (
+                    {availableExamInstances.length > 0 && (
                       <span className="text-xs text-gray-500">
                         共 {availableExamInstances.length} 次检查
                       </span>

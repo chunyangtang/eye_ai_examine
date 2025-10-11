@@ -15,6 +15,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from contextlib import asynccontextmanager
 
 from datatype import ImageInfo, EyeDiagnosis, PatientData, SubmitDiagnosisRequest, EyePrediction, EyePredictionThresholds, ManualDiagnosisData, UpdateSelectionRequest, AlterThresholdRequest, CustomDiseases
 from patientdataio import load_batch_patient_data, create_batch_dummy_patient_data, load_patient_from_record
@@ -28,7 +29,18 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: ensure initial data load and start monitor
+    logger.info("Application startup: loading initial data...")
+    _refresh_inference_cache(force=True)
+    _start_background_monitor()
+    yield
+    # Shutdown: stop the monitor
+    logger.info("Application shutdown: stopping background monitor...")
+    _stop_background_monitor()
+
+app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -138,12 +150,71 @@ OLLAMA_MAX_RETRIES = max(1, int(os.getenv("LLM_MAX_RETRIES", "2")))
 OLLAMA_RETRY_DELAY_SECONDS = max(0.0, float(os.getenv("LLM_RETRY_DELAY_SECONDS", "1.0")))
 OLLAMA_KEEP_ALIVE = os.getenv("LLM_KEEP_ALIVE", "30m")
 
+# Auto-reload configuration
+AUTO_RELOAD_ENABLED = os.getenv("AUTO_RELOAD_DATA", "true").lower() in ("true", "1", "yes")
+AUTO_RELOAD_INTERVAL_SECONDS = max(5, int(os.getenv("AUTO_RELOAD_INTERVAL", "30")))
+
+# Background data monitoring
+_monitor_thread: Optional[threading.Thread] = None
+_monitor_stop_event = threading.Event()
+
+
+def _background_data_monitor():
+    """Background thread that periodically checks for new/modified inference data."""
+    logger.info(
+        "Starting background data monitor (interval: %s seconds, enabled: %s)",
+        AUTO_RELOAD_INTERVAL_SECONDS,
+        AUTO_RELOAD_ENABLED
+    )
+    
+    while not _monitor_stop_event.is_set():
+        if AUTO_RELOAD_ENABLED:
+            try:
+                _refresh_inference_cache(force=False)
+            except Exception as exc:
+                logger.error("Error in background data monitor: %s", exc)
+        
+        # Wait for the interval or until stop event is set
+        _monitor_stop_event.wait(timeout=AUTO_RELOAD_INTERVAL_SECONDS)
+    
+    logger.info("Background data monitor stopped")
+
+
+def _start_background_monitor():
+    """Start the background monitoring thread."""
+    global _monitor_thread
+    if _monitor_thread is not None and _monitor_thread.is_alive():
+        logger.warning("Background monitor already running")
+        return
+    
+    _monitor_stop_event.clear()
+    _monitor_thread = threading.Thread(target=_background_data_monitor, daemon=True, name="DataMonitor")
+    _monitor_thread.start()
+    logger.info("Background data monitor thread started")
+
+
+def _stop_background_monitor():
+    """Stop the background monitoring thread."""
+    global _monitor_thread
+    if _monitor_thread is None or not _monitor_thread.is_alive():
+        return
+    
+    logger.info("Stopping background data monitor...")
+    _monitor_stop_event.set()
+    _monitor_thread.join(timeout=5)
+    _monitor_thread = None
+
+
+# Background monitor will be started by FastAPI lifespan event
+
 # --- Inference data aggregation (latest dated folders) ---
 _inference_cache_lock = threading.Lock()
 # Changed to support multiple instances per patient: Dict[patient_id, List[instance]]
 # Each instance is a dict with keys: 'data', 'source_date', 'source_file', 'base_dir'
 _inference_patient_records: Dict[str, List[Dict[str, Any]]] = {}
 _inference_loaded_files: List[str] = []
+# Track file modification times to detect changes
+_inference_file_mtimes: Dict[str, float] = {}
 
 
 def _resolve_inference_sources() -> List[tuple]:
@@ -184,12 +255,31 @@ def _resolve_inference_sources() -> List[tuple]:
 
 
 def _refresh_inference_cache(force: bool = False) -> None:
-    global _inference_patient_records, _inference_loaded_files
+    global _inference_patient_records, _inference_loaded_files, _inference_file_mtimes
     sources = _resolve_inference_sources()
     file_keys = [path for path, _, _ in sources]
 
     with _inference_cache_lock:
-        if not force and file_keys == _inference_loaded_files and _inference_patient_records:
+        # Check if we need to reload based on:
+        # 1. Force flag
+        # 2. New files detected (file_keys changed)
+        # 3. Existing files modified (mtime changed)
+        needs_reload = force or file_keys != _inference_loaded_files
+        
+        if not needs_reload:
+            # Check if any existing file has been modified
+            for path in file_keys:
+                try:
+                    current_mtime = os.path.getmtime(path)
+                    if path not in _inference_file_mtimes or _inference_file_mtimes[path] != current_mtime:
+                        needs_reload = True
+                        logger.info(f"Detected modification in {path}")
+                        break
+                except Exception:
+                    needs_reload = True
+                    break
+        
+        if not needs_reload and _inference_patient_records:
             return
 
         # Build multi-instance structure: patient_id -> list of exam instances
@@ -230,6 +320,14 @@ def _refresh_inference_cache(force: bool = False) -> None:
 
         _inference_patient_records = combined
         _inference_loaded_files = file_keys
+        
+        # Update modification times
+        _inference_file_mtimes = {}
+        for path in file_keys:
+            try:
+                _inference_file_mtimes[path] = os.path.getmtime(path)
+            except Exception:
+                pass
 
         total_instances = sum(len(instances) for instances in combined.values())
         logger.info(
@@ -521,6 +619,46 @@ async def get_patient_exam_instances(ris_exam_id: str):
     except Exception as e:
         print(f"Error loading exam instances for {ris_exam_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to load exam instances")
+
+@app.post("/api/reload_data")
+async def reload_data_manually():
+    """Manually trigger a reload of inference data from disk."""
+    try:
+        logger.info("Manual data reload requested")
+        _refresh_inference_cache(force=True)
+        with _inference_cache_lock:
+            total_patients = len(_inference_patient_records)
+            total_instances = sum(len(instances) for instances in _inference_patient_records.values())
+        return {
+            "status": "success",
+            "message": "Data reloaded successfully",
+            "patients_count": total_patients,
+            "total_instances": total_instances
+        }
+    except Exception as e:
+        logger.error(f"Error during manual reload: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to reload data: {str(e)}")
+
+@app.get("/api/monitor_status")
+async def get_monitor_status():
+    """Get status of the background data monitor."""
+    global _monitor_thread
+    is_running = _monitor_thread is not None and _monitor_thread.is_alive()
+    
+    with _inference_cache_lock:
+        loaded_files_count = len(_inference_loaded_files)
+        patients_count = len(_inference_patient_records)
+        total_instances = sum(len(instances) for instances in _inference_patient_records.values())
+    
+    return {
+        "monitor_enabled": AUTO_RELOAD_ENABLED,
+        "monitor_running": is_running,
+        "reload_interval_seconds": AUTO_RELOAD_INTERVAL_SECONDS,
+        "loaded_files": loaded_files_count,
+        "patients_count": patients_count,
+        "total_instances": total_instances,
+        "loaded_file_paths": _inference_loaded_files
+    }
 
 @app.post("/api/submit_diagnosis")
 async def submit_diagnosis(request: SubmitDiagnosisRequest):
