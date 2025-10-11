@@ -1376,12 +1376,6 @@ def _summarize_consultation(cons: Optional[Dict[str, Any]]) -> str:
     if not cons or not isinstance(cons, dict):
         return "无"
     
-    # Mapping for onset method codes to descriptive text
-    onset_mapping = {
-        "A": "突发性（数小时内迅速出现）",
-        "B": "渐进性（数天或更长时间缓慢加重）"
-    }
-    
     map_area = lambda a: "左眼" if a=="left" else ("右眼" if a=="right" else "双眼")
     areas = [map_area(a) for a in (cons.get("affectedArea") or [])]
     parts = []
@@ -1396,8 +1390,8 @@ def _summarize_consultation(cons: Optional[Dict[str, Any]]) -> str:
         segs = []
         if ms: segs.append(f"主要：{ms}")
         if om or ot:
-            # Map onset method code to descriptive text
-            onset_desc = onset_mapping.get(om, om) if om else ""
+            # Use onset method text directly (no mapping needed)
+            onset_desc = om if om else ""
             time_desc = ot if ot else ""
             combined = f"{onset_desc} {time_desc}".strip()
             if combined:

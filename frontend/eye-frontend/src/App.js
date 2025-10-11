@@ -172,46 +172,6 @@ const ExpandedImageModal = ({ isOpen, onClose, imageInfo }) => {
 
 // ConsultationInfoSection component - This will be displayed on the left
 const ConsultationInfoSection = ({ consultationData, onChange, onSubmit, isSubmitting }) => {
-  // Mapping of choice codes to human-readable text
-  const symptomMapping = {
-    "A": "视物模糊/视力下降",
-    "B": "眼前出现漂浮物、黑影飘动",
-    "C": "闪光感/水波纹/视物遮挡", 
-    "D": "眼红/充血/分泌物增多/眼痒",
-    "E": "眼睛干涩/异物感/疲劳",
-    "F": "眼睛长了小疙瘩/肿物（眼睑/角膜/结膜）",
-    "G": "眼痛/眼眶痛",
-    "H": "眼球突出",
-    "I": "其他症状"
-  };
-  
-  const onsetMapping = {
-    "A": "突发性（数小时内迅速出现）",
-    "B": "渐进性（数天或更长时间缓慢加重）"
-  };
-  
-  const historyMapping = {
-    "A": "近期外伤、眼部手术或接触化学物质",
-    "B": "有高血压、糖尿病等全身疾病史",
-    "C": "长期戴隐形眼镜或屈光不正史",
-    "D": "长期屏幕使用史",
-    "E": "无明显诱因或既往病史"
-  };
-  
-  // Format accompanying symptoms
-  const formatAccompanyingSymptoms = (symptoms) => {
-    if (!symptoms) return "";
-    if (typeof symptoms === 'string') return symptoms; // already free text
-    if (!Array.isArray(symptoms) || symptoms.length === 0) return "";
-    const symptomTexts = {
-      A: "畏光/怕光", B: "眼部分泌物异常", C: "眼部有异物感或疼痛", D: "眼部肿胀",
-      E: "头痛/恶心呕吐", F: "复视", G: "视野缺损", H: "视物变形",
-      I: "眼球运动障碍", J: "看灯光有彩虹样光环", K: "眼前红色烟雾样遮挡",
-      L: "色觉异常", M: "无其他明显症状"
-    };
-    return symptoms.map(s => symptomTexts[s] || s).join(", ");
-  };
-
   // Translate gender enum to Chinese for display
   const toZhGender = (g) => {
     if (!g) return '';
@@ -432,13 +392,7 @@ const ConsultationInfoSection = ({ consultationData, onChange, onSubmit, isSubmi
                 <div>
                   <span className="block text-gray-600">主要症状 (Main Symptom):</span>
                   <textarea
-                    value={
-                      eyeData.mainSymptom
-                        ? (eyeData.mainSymptom === 'I' && eyeData.mainSymptomOther
-                            ? eyeData.mainSymptomOther
-                            : (symptomMapping[eyeData.mainSymptom] || eyeData.mainSymptom))
-                        : ''
-                    }
+                    value={eyeData.mainSymptom || ''}
                     onChange={(e) => handleEyeChange(eye, 'mainSymptom', e.target.value)}
                     className="w-full border rounded-md p-1 text-sm"
                     rows={2}
@@ -451,7 +405,7 @@ const ConsultationInfoSection = ({ consultationData, onChange, onSubmit, isSubmi
                   <div className="flex gap-2">
                     <input
                       type="text"
-                      value={eyeData.onsetMethod ? (onsetMapping[eyeData.onsetMethod] || eyeData.onsetMethod) : ''}
+                      value={eyeData.onsetMethod || ''}
                       onChange={(e) => handleEyeChange(eye, 'onsetMethod', e.target.value)}
                       placeholder="起病方式"
                       className="flex-1 border rounded-md p-1 text-sm"
@@ -470,7 +424,13 @@ const ConsultationInfoSection = ({ consultationData, onChange, onSubmit, isSubmi
                 <div>
                   <span className="block text-gray-600">伴随症状 (Accompanying):</span>
                   <textarea
-                    value={formatAccompanyingSymptoms(eyeData.accompanyingSymptoms)}
+                    value={
+                      typeof eyeData.accompanyingSymptoms === 'string' 
+                        ? eyeData.accompanyingSymptoms 
+                        : Array.isArray(eyeData.accompanyingSymptoms) 
+                          ? eyeData.accompanyingSymptoms.join('、') 
+                          : ''
+                    }
                     onChange={(e) => handleEyeChange(eye, 'accompanyingSymptoms', e.target.value)}
                     className="w-full border rounded-md p-1 text-sm"
                     rows={2}
@@ -481,7 +441,7 @@ const ConsultationInfoSection = ({ consultationData, onChange, onSubmit, isSubmi
                 <div>
                   <span className="block text-gray-600">既往病史及诱因 (History):</span>
                   <textarea
-                    value={eyeData.medicalHistory ? (historyMapping[eyeData.medicalHistory] || eyeData.medicalHistory) : ''}
+                    value={eyeData.medicalHistory || ''}
                     onChange={(e) => handleEyeChange(eye, 'medicalHistory', e.target.value)}
                     className="w-full border rounded-md p-1 text-sm"
                     rows={2}
@@ -1901,15 +1861,15 @@ function App() {
                   {patientIdPrefix}<span className="text-blue-700 font-bold">{currentExamId || 'No ID'}</span>
                 </span>
                 
-                {/* Exam Date Switcher - shown only when multiple instances available */}
-                {availableExamInstances.length > 1 && (
+                {/* Exam Date Switcher - always shown for consistency and exam time info */}
+                {availableExamInstances.length > 0 && (
                   <div className="flex items-center gap-2 ml-4 px-3 py-1 bg-yellow-50 border border-yellow-300 rounded-md">
                     <span className="text-xs font-medium text-gray-600">检查日期:</span>
                     <select
                       value={currentExamDate || ''}
                       onChange={(e) => handleExamDateSwitch(e.target.value)}
                       className="text-sm border border-gray-300 rounded px-2 py-1 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
-                      disabled={isLoadingInstances}
+                      disabled={isLoadingInstances || availableExamInstances.length === 1}
                     >
                       {availableExamInstances.map((instance) => (
                         <option key={instance.exam_date} value={instance.exam_date}>
@@ -1917,9 +1877,11 @@ function App() {
                         </option>
                       ))}
                     </select>
-                    <span className="text-xs text-gray-500">
-                      共 {availableExamInstances.length} 次检查
-                    </span>
+                    {availableExamInstances.length > 1 && (
+                      <span className="text-xs text-gray-500">
+                        共 {availableExamInstances.length} 次检查
+                      </span>
+                    )}
                   </div>
                 )}
                 
