@@ -1889,7 +1889,6 @@ async def llm_chat_stream(req: LLMChatRequest):
     async def ollama_stream():
         # OLLAMA API端点
         url = f"{env['base'].rstrip('/')}/api/chat"
-        headers = {"Content-Type": "application/json"}
         payload = {
             "model": env["model"],
             "messages": messages_to_send,
@@ -1900,95 +1899,124 @@ async def llm_chat_stream(req: LLMChatRequest):
         logger.info(f"Sending request to OLLAMA: {url}")
         logger.info(f"Payload model: {payload['model']}")
         logger.info(f"Payload stream: {payload['stream']}")
-        logger.info(f"Payload messages: {payload['messages']}")
-        logger.info(f"Payload keep_alive: {payload['keep_alive']}")
         logger.info(f"Request type: {'COMBINED_USER_PROMPT' if is_initial_update else 'USER_CONTEXT_PROMPT'}")
         
-        timeout = httpx.Timeout(120.0, read=120.0)
+        # Use curl-like approach with simpler, more stable HTTP client configuration
+        # Increase timeouts and use connection pooling similar to curl's behavior
+        timeout = httpx.Timeout(
+            connect=30.0,  # Connection timeout
+            read=300.0,    # Read timeout (5 minutes for long responses)
+            write=30.0,    # Write timeout
+            pool=10.0      # Pool timeout
+        )
+        
+        # Configure limits similar to curl's default behavior
+        limits = httpx.Limits(
+            max_keepalive_connections=5,
+            max_connections=10,
+            keepalive_expiry=30.0
+        )
+        
         last_exception: Optional[Exception] = None
 
         for attempt in range(1, OLLAMA_MAX_RETRIES + 1):
-                logger.info(
-                    "Starting OLLAMA streaming attempt %s/%s for patient %s",
-                    attempt,
-                    OLLAMA_MAX_RETRIES,
-                    req.patient_id
-                )
+            logger.info(
+                "Starting OLLAMA streaming attempt %s/%s for patient %s",
+                attempt,
+                OLLAMA_MAX_RETRIES,
+                req.patient_id
+            )
 
-                response_chunks = 0
-                pending_text = ""
-                max_buffer_len = 16384
+            response_chunks = 0
+            pending_text = ""
 
-                try:
-                    async with httpx.AsyncClient(timeout=timeout) as client:
-                        async with client.stream("POST", url, headers=headers, json=payload) as r:
-                            logger.info(f"OLLAMA Response Status: {r.status_code}")
+            try:
+                # Create client with curl-like configuration
+                async with httpx.AsyncClient(
+                    timeout=timeout,
+                    limits=limits,
+                    http2=False,  # Disable HTTP/2 for better stability
+                    follow_redirects=True
+                ) as client:
+                    # Use simpler iter_raw approach instead of iter_lines for better reliability
+                    async with client.stream(
+                        "POST",
+                        url,
+                        json=payload,
+                        headers={"Content-Type": "application/json"}
+                    ) as r:
+                        logger.info(f"OLLAMA Response Status: {r.status_code}")
 
-                            if r.status_code != 200:
-                                error_text = await r.atext()
-                                last_exception = RuntimeError(f"HTTP {r.status_code}: {error_text}")
-                                logger.error("OLLAMA Error Response (attempt %s): %s", attempt, error_text)
+                        if r.status_code != 200:
+                            error_text = await r.aread()
+                            error_msg = error_text.decode('utf-8', errors='replace')
+                            last_exception = RuntimeError(f"HTTP {r.status_code}: {error_msg}")
+                            logger.error("OLLAMA Error Response (attempt %s): %s", attempt, error_msg)
+                            continue
+
+                        # Process response line by line like curl does
+                        buffer = b""
+                        async for chunk in r.aiter_bytes(chunk_size=1024):
+                            if not chunk:
                                 continue
-
-                            async for raw_line in r.aiter_lines():
-                                if raw_line is None:
+                            
+                            buffer += chunk
+                            
+                            # Process complete lines
+                            while b'\n' in buffer:
+                                line_bytes, buffer = buffer.split(b'\n', 1)
+                                
+                                try:
+                                    line = line_bytes.decode('utf-8', errors='replace').strip()
+                                except Exception as e:
+                                    logger.warning(f"Failed to decode line: {e}")
                                     continue
-
-                                line = raw_line.strip()
+                                
                                 if not line:
                                     continue
 
-                                if line.startswith(":"):
-                                    continue
-
-                                if line.startswith("event:"):
-                                    logger.debug(f"Skipping SSE event label: {line}")
+                                # Skip SSE prefixes
+                                if line.startswith(":") or line.startswith("event:"):
                                     continue
 
                                 if line.startswith("data:"):
-                                    line = line[len("data:"):].strip()
-                                    if not line:
-                                        continue
+                                    line = line[5:].strip()
 
                                 if line in ("[DONE]", '"[DONE]"'):
                                     logger.info("OLLAMA stream signaled completion token [DONE].")
                                     break
 
-                                pending_text += line
-
+                                # Try to parse JSON
                                 try:
-                                    obj = json.loads(pending_text)
-                                    pending_text = ""
+                                    obj = json.loads(line)
                                 except json.JSONDecodeError:
-                                    if len(pending_text) > max_buffer_len:
-                                        logger.warning(
-                                            "Streaming buffer exceeded %s characters; resetting to avoid runaway growth.",
-                                            max_buffer_len
-                                        )
+                                    # Could be partial JSON, append to pending
+                                    pending_text += line
+                                    try:
+                                        obj = json.loads(pending_text)
                                         pending_text = ""
-                                    else:
-                                        logger.debug(
-                                            "Waiting for additional stream data to complete JSON frame (buffer length=%s).",
-                                            len(pending_text)
-                                        )
-                                    continue
+                                    except json.JSONDecodeError:
+                                        # Still not valid, wait for more data
+                                        if len(pending_text) > 32768:
+                                            logger.warning("Pending buffer too large, resetting")
+                                            pending_text = ""
+                                        continue
 
                                 if not isinstance(obj, dict):
-                                    logger.debug(f"Ignoring non-dict stream payload: {obj}")
                                     continue
 
                                 response_chunks += 1
                                 if response_chunks == 1:
                                     logger.info("Started receiving OLLAMA streaming response...")
 
-                                logger.info(f"Parsed response chunk #{response_chunks}: {obj}")
-
+                                # Check for errors
                                 if "error" in obj:
                                     err_text = obj.get("error")
                                     last_exception = RuntimeError(err_text)
                                     logger.error("OLLAMA Stream Error (attempt %s): %s", attempt, err_text)
                                     break
 
+                                # Extract content
                                 message = obj.get("message", {})
                                 content = message.get("content", "")
 
@@ -1996,66 +2024,81 @@ async def llm_chat_stream(req: LLMChatRequest):
                                     assistant_buf.append(content)
                                     yield content
 
+                                # Check if done
                                 if obj.get("done", False):
                                     logger.info(
                                         "OLLAMA response completed. Total chunks: %s, response length: %s chars",
                                         response_chunks,
                                         len(''.join(assistant_buf))
                                     )
-                                    break
+                                    return  # Success, exit immediately
 
-                except httpx.TimeoutException as e:
-                    last_exception = e
-                    logger.warning(
-                        "OLLAMA request timeout on attempt %s/%s",
-                        attempt,
-                        OLLAMA_MAX_RETRIES,
-                        exc_info=e
-                    )
-                except httpx.ConnectError as e:
-                    last_exception = e
-                    logger.warning(
-                        "OLLAMA connection error on attempt %s/%s: %s",
-                        attempt,
-                        OLLAMA_MAX_RETRIES,
-                        e
-                    )
-                except httpx.RequestError as e:
-                    last_exception = e
-                    logger.warning(
-                        "OLLAMA request error on attempt %s/%s: %s",
-                        attempt,
-                        OLLAMA_MAX_RETRIES,
-                        e
-                    )
-                except Exception as e:
-                    last_exception = e
-                    logger.error(
-                        "OLLAMA request failed on attempt %s/%s: %s",
-                        attempt,
-                        OLLAMA_MAX_RETRIES,
-                        e
-                    )
+                        # Process any remaining buffer
+                        if buffer:
+                            try:
+                                line = buffer.decode('utf-8', errors='replace').strip()
+                                if line:
+                                    obj = json.loads(line)
+                                    if isinstance(obj, dict) and obj.get("done"):
+                                        logger.info("Stream completed with final buffer")
+                                        return
+                            except Exception:
+                                pass
 
-                if assistant_buf:
-                    logger.info("OLLAMA streaming succeeded on attempt %s", attempt)
-                    return
+            except httpx.TimeoutException as e:
+                last_exception = e
+                logger.warning(
+                    "OLLAMA request timeout on attempt %s/%s: %s",
+                    attempt,
+                    OLLAMA_MAX_RETRIES,
+                    str(e)
+                )
+            except httpx.ConnectError as e:
+                last_exception = e
+                logger.warning(
+                    "OLLAMA connection error on attempt %s/%s: %s",
+                    attempt,
+                    OLLAMA_MAX_RETRIES,
+                    str(e)
+                )
+            except httpx.RequestError as e:
+                last_exception = e
+                logger.warning(
+                    "OLLAMA request error on attempt %s/%s: %s",
+                    attempt,
+                    OLLAMA_MAX_RETRIES,
+                    str(e)
+                )
+            except Exception as e:
+                last_exception = e
+                logger.error(
+                    "OLLAMA request failed on attempt %s/%s: %s",
+                    attempt,
+                    OLLAMA_MAX_RETRIES,
+                    str(e),
+                    exc_info=True
+                )
 
-                if attempt < OLLAMA_MAX_RETRIES:
-                    logger.info(
-                        "Retrying OLLAMA stream (next attempt %s/%s) after %.2f seconds",
-                        attempt + 1,
-                        OLLAMA_MAX_RETRIES,
-                        OLLAMA_RETRY_DELAY_SECONDS
-                    )
-                    await asyncio.sleep(OLLAMA_RETRY_DELAY_SECONDS)
+            if assistant_buf:
+                logger.info("OLLAMA streaming succeeded on attempt %s", attempt)
+                return
 
+            if attempt < OLLAMA_MAX_RETRIES:
+                logger.info(
+                    "Retrying OLLAMA stream (next attempt %s/%s) after %.2f seconds",
+                    attempt + 1,
+                    OLLAMA_MAX_RETRIES,
+                    OLLAMA_RETRY_DELAY_SECONDS
+                )
+                await asyncio.sleep(OLLAMA_RETRY_DELAY_SECONDS)
+
+        # All attempts failed
         if not assistant_buf:
             if last_exception:
                 logger.error(
                     "OLLAMA streaming failed after %s attempts: %s",
                     OLLAMA_MAX_RETRIES,
-                    last_exception
+                    str(last_exception)
                 )
                 yield f"\n[OLLAMA **错误**] {str(last_exception)}\n"
             else:
