@@ -1929,10 +1929,12 @@ async def llm_chat_stream(req: LLMChatRequest):
     sys_prompt = cfg.get("system_prompt", "") or "你是一个有用的AI助手。"
     
     # 检查是否是首次更新推理请求（只有一个user消息且内容是update_prompt）
+
+    # 把req.messages都打印出来看
+    logger.info(req.messages)
+
     is_initial_update = (
-        len(req.messages or []) == 1 and 
-        req.messages[0].get("role") == "user" and
-        req.messages[0].get("content", "").strip() == cfg.get("update_prompt", "").strip()
+        len(req.messages or []) == 1
     )
 
     context_text = ""
@@ -1953,12 +1955,15 @@ async def llm_chat_stream(req: LLMChatRequest):
         messages_to_send.append({"role": "system", "content": sys_prompt})
 
     if context_text.strip():
-        if len(context_text) > 2000:
-            context_text = context_text[:2000] + "...[内容过长已截断]"
+        if len(context_text) > 5000:
+            context_text = context_text[:5000] + "...[内容过长已截断]"
             logger.info(f"Trimmed context to {len(context_text)} characters before sending")
-        messages_to_send.append({"role": "user", "content": "/no_think " + context_text})
+        messages_to_send.append({"role": "user", "content": context_text + "</think>"})
 
     if not is_initial_update and req.messages:
+
+        req.messages = req.messages[1:]
+
         for msg in req.messages:
             if not isinstance(msg, dict):
                 continue
@@ -1977,8 +1982,8 @@ async def llm_chat_stream(req: LLMChatRequest):
 
             cleaned = content.strip()
             if role == "user":
-                if not cleaned.startswith("/no_think"):
-                    cleaned = "/no_think " + cleaned
+                if not cleaned.endswith("</think>"):
+                    cleaned = cleaned + "请回答这个问题。</think>"
                 messages_to_send.append({"role": "user", "content": cleaned})
             elif role == "assistant":
                 messages_to_send.append({"role": "assistant", "content": cleaned})
@@ -2007,8 +2012,8 @@ async def llm_chat_stream(req: LLMChatRequest):
         content = msg.get("content", "")
         logger.info(f"Message [{i+1}] ({role}):")
         logger.info("-" * 40)
-        if len(content) > 500:
-            logger.info(f"{content[:500]}...\n[TRUNCATED - Total length: {len(content)} chars]")
+        if len(content) > 2000:
+            logger.info(f"{content[:2000]}...\n[TRUNCATED - Total length: {len(content)} chars]")
         else:
             logger.info(content)
         logger.info("-" * 40)
