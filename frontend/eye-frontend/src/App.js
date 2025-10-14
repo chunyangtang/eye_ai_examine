@@ -714,34 +714,27 @@ function App() {
       // Set the active threshold set from patient data
       setActiveThresholdSet(result.active_threshold_set || 0);
 
-      // Initialize the 4 display images in a fixed desired order with graceful fallback
-      const desiredOrder = ['左眼CFP', '右眼CFP', '左眼外眼照', '右眼外眼照'];
+      // Initialize the 4 display images in a fixed desired order with latest image selection
+      const desiredOrder = ['右眼CFP', '左眼CFP', '右眼外眼照', '左眼外眼照'];
       const allImages = Array.isArray(result.eye_images) ? result.eye_images : [];
       const selectedIds = [];
-      const used = new Set();
 
-      // First pass: pick images matching desired types in order
+      // For each desired type, pick the LATEST image (last in array with that type)
       for (const desiredType of desiredOrder) {
-        const match = allImages.find(img => img.type === desiredType && !used.has(img.id));
-        if (match) {
-          selectedIds.push(match.id);
-          used.add(match.id);
+        // Find all images of this type
+        const matchingImages = allImages.filter(img => img.type === desiredType);
+        
+        if (matchingImages.length > 0) {
+          // Get the latest one (last in the array)
+          const latestImage = matchingImages[matchingImages.length - 1];
+          selectedIds.push(latestImage.id);
         } else {
+          // No image of this type exists, push null (will be filtered out later for hiding)
           selectedIds.push(null);
         }
       }
 
-      // Fill null slots with any remaining images
-      for (let i = 0; i < selectedIds.length; i++) {
-        if (!selectedIds[i]) {
-          const fallback = allImages.find(img => !used.has(img.id));
-          if (fallback) {
-            selectedIds[i] = fallback.id;
-            used.add(fallback.id);
-          }
-        }
-      }
-
+      // Filter out null values to hide empty slots
       setSelectedDisplayImages(selectedIds.filter(id => id !== null));
       setLoading(false);
       setHasUnsavedChanges(false);
@@ -2045,7 +2038,7 @@ function App() {
                     AI检查摘要 (AI Examination Summary)
                   </h3>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    {['left_eye','right_eye'].map((eyeKey) => {
+                    {['right_eye', 'left_eye'].map((eyeKey) => {
                       const eyeLabel = eyeKey === 'left_eye' ? '左眼 (Left Eye)' : '右眼 (Right Eye)';
                       const { primaries, secondaries } = getEyeHighlights(eyeKey);
                       const statusTextMap = {
@@ -2125,8 +2118,8 @@ function App() {
                       <thead className="sticky top-0 bg-white shadow-sm z-10">
                         <tr>
                           <th className="w-[30%] p-1 text-left text-gray-600 font-medium">疾病 (Disease)</th>
-                          <th className="p-1 text-center text-gray-600 font-medium">左眼 (L)</th>
                           <th className="p-1 text-center text-gray-600 font-medium">右眼 (R)</th>
+                          <th className="p-1 text-center text-gray-600 font-medium">左眼 (L)</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -2150,21 +2143,6 @@ function App() {
                               </td>
                               <td className="p-1">
                                 <div className="relative h-3 rounded-full bg-gradient-to-r from-green-300 via-yellow-300 to-red-400 overflow-hidden shadow-inner">
-                                  <div className="absolute top-0 left-0 h-full bg-green-600/20" style={{ width: `${leftWidth}%` }} />
-                                  <div className="absolute top-0 left-1/2 w-0.5 h-full bg-gray-600/70" />
-                                  <div className="absolute top-0 h-full flex items-center" style={{ left: `${leftWidth}%`, transform: 'translateX(-50%)' }}
-                                       title={`${diseaseInfo[dk].fullName}: P:${formatProb(leftProb)} T:${formatProb(t)}`}>
-                                    <div className="w-0.5 h-full bg-blue-700/70"></div>
-                                    <div className="absolute left-1/2 top-1/2 w-1.5 h-1.5 -translate-x-1/2 -translate-y-1/2 rotate-45 bg-blue-600 border border-white shadow-sm" />
-                                  </div>
-                                  <div className="absolute inset-0 flex justify-between px-1 text-[8px] leading-3 text-gray-600 select-none font-medium">
-                                    <span>{formatProb(leftProb)}</span>
-                                    <span className="text-gray-500">T:{formatProb(t)}</span>
-                                  </div>
-                                </div>
-                              </td>
-                              <td className="p-1">
-                                <div className="relative h-3 rounded-full bg-gradient-to-r from-green-300 via-yellow-300 to-red-400 overflow-hidden shadow-inner">
                                   <div className="absolute top-0 left-0 h-full bg-green-600/20" style={{ width: `${rightWidth}%` }} />
                                   <div className="absolute top-0 left-1/2 w-0.5 h-full bg-gray-600/70" />
                                   <div className="absolute top-0 h-full flex items-center" style={{ left: `${rightWidth}%`, transform: 'translateX(-50%)' }}
@@ -2174,6 +2152,21 @@ function App() {
                                   </div>
                                   <div className="absolute inset-0 flex justify-between px-1 text-[8px] leading-3 text-gray-600 select-none font-medium">
                                     <span>{formatProb(rightProb)}</span>
+                                    <span className="text-gray-500">T:{formatProb(t)}</span>
+                                  </div>
+                                </div>
+                              </td>
+                              <td className="p-1">
+                                <div className="relative h-3 rounded-full bg-gradient-to-r from-green-300 via-yellow-300 to-red-400 overflow-hidden shadow-inner">
+                                  <div className="absolute top-0 left-0 h-full bg-green-600/20" style={{ width: `${leftWidth}%` }} />
+                                  <div className="absolute top-0 left-1/2 w-0.5 h-full bg-gray-600/70" />
+                                  <div className="absolute top-0 h-full flex items-center" style={{ left: `${leftWidth}%`, transform: 'translateX(-50%)' }}
+                                       title={`${diseaseInfo[dk].fullName}: P:${formatProb(leftProb)} T:${formatProb(t)}`}>
+                                    <div className="w-0.5 h-full bg-blue-700/70"></div>
+                                    <div className="absolute left-1/2 top-1/2 w-1.5 h-1.5 -translate-x-1/2 -translate-y-1/2 rotate-45 bg-blue-600 border border-white shadow-sm" />
+                                  </div>
+                                  <div className="absolute inset-0 flex justify-between px-1 text-[8px] leading-3 text-gray-600 select-none font-medium">
+                                    <span>{formatProb(leftProb)}</span>
                                     <span className="text-gray-500">T:{formatProb(t)}</span>
                                   </div>
                                 </div>
@@ -2303,7 +2296,7 @@ function App() {
                   {selectedDisplayImages.map((imageId, imgIndex) => {
                     const imgInfo = getDisplayedImageInfo(imageId);
                     if (!imgInfo) return null;
-                    const typeOptions = ['--- Select ---', '左眼CFP', '右眼CFP', '左眼外眼照', '右眼外眼照'];
+                    const typeOptions = ['--- Select ---', '右眼CFP', '左眼CFP', '右眼外眼照', '左眼外眼照'];
                     const defaultQualityOption = '图像质量可用';
                     const qualityOptions = [defaultQualityOption, '图像质量高', '图像质量差', '--- Select ---'];
                     return (
@@ -2339,39 +2332,6 @@ function App() {
                 <h4 className="text-sm font-semibold text-gray-700 mb-3 tracking-wide">手动诊断 (Manual Disease Diagnosis)</h4>
                 
                 <div className="grid grid-cols-2 gap-4 mb-4">
-                  {/* Left Eye Manual Diagnosis */}
-                  <div className="border border-gray-200 rounded-lg p-4 bg-blue-50">
-                    <h5 className="font-medium text-gray-700 mb-3 text-center">左眼 (Left Eye)</h5>
-                    <div className="space-y-2">
-                      {Object.entries(manualDiseaseInfo).map(([disease, info]) => (
-                        <label key={disease} className="flex items-center space-x-2">
-                          <input
-                            type="checkbox"
-                            checked={(manualDiagnosis?.left_eye?.[disease]) || false}
-                            onChange={() => handleManualDiagnosisToggle('left_eye', disease)}
-                            className="form-checkbox h-4 w-4 text-blue-600"
-                          />
-                          <span className="text-sm">
-                            {info.chinese} / {info.english}
-                          </span>
-                        </label>
-                      ))}
-                      
-                      <div className="mt-3">
-                        <label className="block text-xs font-medium text-gray-700 mb-1">
-                          其他疾病 (Custom Disease):
-                        </label>
-                        <input
-                          type="text"
-                          value={customDiseases?.left_eye || ''}
-                          onChange={(e) => handleCustomDiseaseChange('left_eye', e.target.value)}
-                          placeholder="输入其他疾病 / Enter custom disease"
-                          className="w-full px-2 py-1 border border-gray-300 rounded-md text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
-                        />
-                      </div>
-                    </div>
-                  </div>
-                  
                   {/* Right Eye Manual Diagnosis */}
                   <div className="border border-gray-200 rounded-lg p-4 bg-green-50">
                     <h5 className="font-medium text-gray-700 mb-3 text-center">右眼 (Right Eye)</h5>
@@ -2400,6 +2360,39 @@ function App() {
                           onChange={(e) => handleCustomDiseaseChange('right_eye', e.target.value)}
                           placeholder="输入其他疾病 / Enter custom disease"
                           className="w-full px-2 py-1 border border-gray-300 rounded-md text-xs focus:outline-none focus:ring-1 focus:ring-green-500"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                  
+                  {/* Left Eye Manual Diagnosis */}
+                  <div className="border border-gray-200 rounded-lg p-4 bg-blue-50">
+                    <h5 className="font-medium text-gray-700 mb-3 text-center">左眼 (Left Eye)</h5>
+                    <div className="space-y-2">
+                      {Object.entries(manualDiseaseInfo).map(([disease, info]) => (
+                        <label key={disease} className="flex items-center space-x-2">
+                          <input
+                            type="checkbox"
+                            checked={(manualDiagnosis?.left_eye?.[disease]) || false}
+                            onChange={() => handleManualDiagnosisToggle('left_eye', disease)}
+                            className="form-checkbox h-4 w-4 text-blue-600"
+                          />
+                          <span className="text-sm">
+                            {info.chinese} / {info.english}
+                          </span>
+                        </label>
+                      ))}
+                      
+                      <div className="mt-3">
+                        <label className="block text-xs font-medium text-gray-700 mb-1">
+                          其他疾病 (Custom Disease):
+                        </label>
+                        <input
+                          type="text"
+                          value={customDiseases?.left_eye || ''}
+                          onChange={(e) => handleCustomDiseaseChange('left_eye', e.target.value)}
+                          placeholder="输入其他疾病 / Enter custom disease"
+                          className="w-full px-2 py-1 border border-gray-300 rounded-md text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
                         />
                       </div>
                     </div>
