@@ -138,6 +138,7 @@ class PatientData(BaseModel):
 
 class SubmitDiagnosisRequest(BaseModel):
     patient_id: str
+    exam_date: Optional[str] = None  # Optional exam date (YYYYMMDD format)
     image_updates: Optional[List[Dict[str, str]]] = None  # Only id, type, quality
     # Manual diagnosis data - accept raw dicts for flexibility
     manual_diagnosis: Optional[Dict[str, Dict[str, bool]]] = None

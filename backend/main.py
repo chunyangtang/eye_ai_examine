@@ -78,14 +78,36 @@ raw_probs_cache: Dict[str, Dict[str, Any]] = {}
 manual_diagnosis_file_lock = threading.Lock()
 
 def _load_manual_diagnosis_store() -> Dict[str, Any]:
-    """Read persisted manual diagnosis information keyed by patient id."""
+    """
+    Read persisted manual diagnosis information.
+    
+    Returns dict with structure:
+    - New format: {patient_id: {exam_date: {manual_diagnosis_data}, ...}, ...}
+    - Old format (auto-converted): {patient_id: {manual_diagnosis_data}} -> {patient_id: {"20251014": {manual_diagnosis_data}}}
+    """
     if not os.path.exists(EXAMINE_RESULTS_PATH):
         return {}
     try:
         with open(EXAMINE_RESULTS_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
         if isinstance(data, dict):
-            return data
+            # Auto-detect and convert old format to new format
+            converted_data = {}
+            for patient_id, content in data.items():
+                if isinstance(content, dict):
+                    # Check if it's old format (has manual_diagnosis key directly)
+                    if "manual_diagnosis" in content or "custom_diseases" in content or "diagnosis_notes" in content:
+                        # Old format - convert to new format with default date
+                        logger.info(f"Converting old format manual diagnosis for patient {patient_id} to new format")
+                        converted_data[patient_id] = {
+                            "20251014": content  # Use today's date as default for old records
+                        }
+                    else:
+                        # Already new format (exam_date -> diagnosis data)
+                        converted_data[patient_id] = content
+                else:
+                    logger.warning(f"Skipping invalid entry for patient {patient_id}")
+            return converted_data
         logger.warning("Manual diagnosis file %s did not contain a dict; resetting", EXAMINE_RESULTS_PATH)
     except json.JSONDecodeError:
         logger.error("Manual diagnosis file %s is not valid JSON; ignoring", EXAMINE_RESULTS_PATH)
@@ -112,7 +134,10 @@ def _save_manual_diagnosis_store(serializable: Dict[str, Any]) -> None:
 
 
 def _preload_manual_diagnoses() -> None:
-    """Populate in-memory manual diagnosis cache from persisted JSON file."""
+    """
+    Populate in-memory manual diagnosis cache from persisted JSON file.
+    Cache key format: "patient_id" or "patient_id_exam_date" for specific exams.
+    """
     try:
         persisted = _load_manual_diagnosis_store()
     except Exception as exc:
@@ -123,21 +148,32 @@ def _preload_manual_diagnoses() -> None:
         logger.warning("Preloaded manual diagnosis data is not a dict; skipping preload")
         return
 
-    for patient_id, payload in persisted.items():
-        if not isinstance(payload, dict):
+    for patient_id, exam_data in persisted.items():
+        if not isinstance(exam_data, dict):
             continue
-        try:
-            manual_diagnosis_storage[patient_id] = ManualDiagnosisData(**payload)
-        except Exception:
+        
+        # exam_data is now {exam_date: diagnosis_data, ...}
+        for exam_date, payload in exam_data.items():
+            if not isinstance(payload, dict):
+                continue
+            
+            # Create cache key: patient_id_exam_date
+            cache_key = f"{patient_id}_{exam_date}"
+            
             try:
-                from datatype import CustomDiseases
-                manual_diagnosis_storage[patient_id] = ManualDiagnosisData(
-                    manual_diagnosis=payload.get("manual_diagnosis", {}),
-                    custom_diseases=payload.get("custom_diseases") or CustomDiseases(),
-                    diagnosis_notes=payload.get("diagnosis_notes", "")
-                )
-            except Exception as inner_exc:
-                logger.error("Failed to deserialize manual diagnosis for %s: %s", patient_id, inner_exc)
+                manual_diagnosis_storage[cache_key] = ManualDiagnosisData(**payload)
+                logger.debug(f"Loaded manual diagnosis for {cache_key}")
+            except Exception:
+                try:
+                    from datatype import CustomDiseases
+                    manual_diagnosis_storage[cache_key] = ManualDiagnosisData(
+                        manual_diagnosis=payload.get("manual_diagnosis", {}),
+                        custom_diseases=payload.get("custom_diseases") or CustomDiseases(),
+                        diagnosis_notes=payload.get("diagnosis_notes", "")
+                    )
+                    logger.debug(f"Loaded manual diagnosis for {cache_key} (with fallback)")
+                except Exception as inner_exc:
+                    logger.error("Failed to deserialize manual diagnosis for %s: %s", cache_key, inner_exc)
 
 
 _preload_manual_diagnoses()
@@ -664,14 +700,45 @@ async def get_monitor_status():
 async def submit_diagnosis(request: SubmitDiagnosisRequest):
     """
     Receives manual diagnosis data and image info updates from the frontend and stores them.
+    Now supports exam_date to handle multiple exams per patient.
     """
+    # Determine exam_date - use provided or get from patient cache
+    exam_date = request.exam_date
+    cache_key = f"{request.patient_id}_{exam_date}" if exam_date else request.patient_id
+    
     with patient_data_lock:
-        print(f"Received diagnosis submission for patient: {request.patient_id}")
+        print(f"Received diagnosis submission for patient: {request.patient_id}, exam_date: {exam_date}")
         
         # Check if patient exists in cache
-        patient = patients_data_cache.get(request.patient_id)
+        patient = patients_data_cache.get(cache_key)
         if not patient:
-            raise HTTPException(status_code=404, detail=f"Patient {request.patient_id} not found in cache. Load patient data first.")
+            # Try without exam_date
+            patient = patients_data_cache.get(request.patient_id)
+            if not patient:
+                raise HTTPException(status_code=404, detail=f"Patient {request.patient_id} not found in cache. Load patient data first.")
+            # If found without exam_date, try to get exam_date from patient
+            if not exam_date and hasattr(patient, 'examine_time'):
+                # Try to extract date from examine_time
+                try:
+                    import re
+                    match = re.search(r'(\d{8})', patient.examine_time or "")
+                    if match:
+                        exam_date = match.group(1)
+                        logger.info(f"Extracted exam_date {exam_date} from examine_time")
+                except Exception:
+                    pass
+            
+            # If still no exam_date, check inference records to get latest
+            if not exam_date:
+                instances = get_inference_instances(request.patient_id)
+                if instances:
+                    exam_date = instances[0].get('exam_date')  # Get latest
+                    logger.info(f"Using latest exam_date {exam_date} from instances")
+        
+        # Default to today's date if still no exam_date
+        if not exam_date:
+            exam_date = datetime.datetime.now().strftime("%Y%m%d")
+            logger.warning(f"No exam_date found, using today: {exam_date}")
         
         # Store manual diagnosis data
         if request.manual_diagnosis or request.custom_diseases or request.diagnosis_notes:
@@ -692,7 +759,11 @@ async def submit_diagnosis(request: SubmitDiagnosisRequest):
                 diagnosis_notes=request.diagnosis_notes or ""
             )
             
-            manual_diagnosis_storage[request.patient_id] = manual_data
+            # Store in memory with composite key
+            storage_key = f"{request.patient_id}_{exam_date}"
+            manual_diagnosis_storage[storage_key] = manual_data
+            
+            # Persist to disk with new structure
             with manual_diagnosis_file_lock:
                 persisted = _load_manual_diagnosis_store()
                 try:
@@ -703,9 +774,17 @@ async def submit_diagnosis(request: SubmitDiagnosisRequest):
                         "custom_diseases": getattr(manual_data, "custom_diseases", {}),
                         "diagnosis_notes": getattr(manual_data, "diagnosis_notes", "")
                     }
-                persisted[request.patient_id] = payload
+                
+                # Ensure patient_id entry exists
+                if request.patient_id not in persisted:
+                    persisted[request.patient_id] = {}
+                
+                # Store under exam_date
+                persisted[request.patient_id][exam_date] = payload
                 _save_manual_diagnosis_store(persisted)
-            print(f"Manual diagnosis data stored for patient: {request.patient_id}")
+                
+            print(f"Manual diagnosis data stored for patient: {request.patient_id}, exam_date: {exam_date}")
+            print(f"Storage key: {storage_key}")
             print(f"Manual diagnosis: {manual_data.manual_diagnosis}")
             print(f"Custom diseases: {manual_data.custom_diseases}")
             print(f"Diagnosis notes: {manual_data.diagnosis_notes}")
@@ -719,7 +798,7 @@ async def submit_diagnosis(request: SubmitDiagnosisRequest):
                         img.quality = update_img["quality"]
             print(f"Image info updated for {request.patient_id}")
         
-        return {"status": "Manual diagnosis and image info submitted successfully!"}
+        return {"status": "Manual diagnosis and image info submitted successfully!", "exam_date": exam_date}
 
 
 @app.post("/api/update_selection")
@@ -870,22 +949,39 @@ async def update_selection(request: UpdateSelectionRequest):
         }
 
 @app.get("/api/manual_diagnosis/{ris_exam_id}")
-async def get_manual_diagnosis(ris_exam_id: str):
+async def get_manual_diagnosis(ris_exam_id: str, exam_date: Optional[str] = None):
     """
-    Returns the manual diagnosis data for a specific patient.
+    Returns the manual diagnosis data for a specific patient and exam.
+    If exam_date is not provided, tries to find the latest exam.
     """
     with patient_data_lock:
+        # Try with exam_date if provided
+        if exam_date:
+            cache_key = f"{ris_exam_id}_{exam_date}"
+            manual_data = manual_diagnosis_storage.get(cache_key)
+            if manual_data:
+                return manual_data
+        
+        # Try without exam_date (backward compatibility)
         manual_data = manual_diagnosis_storage.get(ris_exam_id)
         if manual_data:
             return manual_data
-        else:
-            # Return empty structure if no manual diagnosis exists yet
-            from datatype import ManualDiagnosisData, CustomDiseases
-            return ManualDiagnosisData(
-                manual_diagnosis={},
-                custom_diseases=CustomDiseases(),
-                diagnosis_notes=""
-            )
+        
+        # If no exam_date provided, try to find any exam for this patient
+        if not exam_date:
+            # Look for any key starting with this patient_id
+            for key, data in manual_diagnosis_storage.items():
+                if key.startswith(f"{ris_exam_id}_"):
+                    logger.info(f"Found manual diagnosis for {key}")
+                    return data
+        
+        # Return empty structure if no manual diagnosis exists yet
+        from datatype import ManualDiagnosisData, CustomDiseases
+        return ManualDiagnosisData(
+            manual_diagnosis={},
+            custom_diseases=CustomDiseases(),
+            diagnosis_notes=""
+        )
 
 @app.get("/api/manual_diagnoses")
 async def get_all_manual_diagnoses():
@@ -1569,10 +1665,32 @@ def _summarize_thresholds(patient: Optional[PatientData]) -> str:
     
     return "；".join(items)
 
-def _summarize_manual(patient_id: str) -> str:
-    md = manual_diagnosis_storage.get(patient_id)
+def _summarize_manual(patient_id: str, exam_date: Optional[str] = None) -> str:
+    """
+    Summarize manual diagnosis for a patient.
+    Tries composite key first, then falls back to simple patient_id for backward compatibility.
+    """
+    md = None
+    
+    # Try with exam_date if provided
+    if exam_date:
+        cache_key = f"{patient_id}_{exam_date}"
+        md = manual_diagnosis_storage.get(cache_key)
+    
+    # Fall back to simple patient_id (backward compatibility)
+    if not md:
+        md = manual_diagnosis_storage.get(patient_id)
+    
+    # If still no data, try to find any exam for this patient
+    if not md and not exam_date:
+        for key, data in manual_diagnosis_storage.items():
+            if key.startswith(f"{patient_id}_"):
+                md = data
+                break
+    
     if not md:
         return "无"
+    
     try:
         md_dict = md.dict()
     except Exception:
@@ -1779,13 +1897,14 @@ def _fallback_ai_summary(patient: Optional[PatientData], eye_key: str) -> str:
         logger.error(f"Fallback AI summary failed: {e}")
         return f"获取预测数据失败: {str(e)}"
 
-def _build_context_placeholders(ris_exam_id: Optional[str], patient_name: Optional[str] = None) -> Dict[str, str]:
+def _build_context_placeholders(ris_exam_id: Optional[str], patient_name: Optional[str] = None, exam_date: Optional[str] = None) -> Dict[str, str]:
     """
     Build context placeholders for LLM prompts.
     
     Args:
         ris_exam_id: Patient exam ID
         patient_name: Optional patient name to prioritize for consultation matching (from URL param)
+        exam_date: Optional exam date to retrieve specific manual diagnosis
     """
     p: Optional[PatientData] = patients_data_cache.get(ris_exam_id or "")
     
@@ -1821,6 +1940,10 @@ def _build_context_placeholders(ris_exam_id: Optional[str], patient_name: Option
     # PRIORITY 2: Fall back to name from patient context or cached patient data
     search_name = (patient_name or ctx.get("name") or name or "").strip()
     search_time = ctx.get("examineTime") or examine_time
+    
+    # If exam_date not provided, try to get from patient data
+    if not exam_date and p:
+        exam_date = getattr(p, "examine_time", None)
     
     logger.info(f"Building context placeholders - ris_exam_id: {ris_exam_id}, patient_name param: {patient_name}, search_name: {search_name}")
 
@@ -1881,7 +2004,7 @@ def _build_context_placeholders(ris_exam_id: Optional[str], patient_name: Option
     ai_left_summary = _summarize_ai_detailed(p, "left_eye")
     ai_right_summary = _summarize_ai_detailed(p, "right_eye")
     threshold_summary = _summarize_thresholds(p)
-    manual_summary = _summarize_manual(ris_exam_id or "")
+    manual_summary = _summarize_manual(ris_exam_id or "", exam_date)
 
     return {
         "patient_name": name or "患者",

@@ -748,7 +748,10 @@ function App() {
 
       // Load manual diagnosis data if available, otherwise initialize with AI predictions
       try {
-        const manualResp = await fetch(`${backendUrl}/api/manual_diagnosis/${examId}`);
+        const manualUrl = currentExamDate 
+          ? `${backendUrl}/api/manual_diagnosis/${examId}?exam_date=${encodeURIComponent(currentExamDate)}`
+          : `${backendUrl}/api/manual_diagnosis/${examId}`;
+        const manualResp = await fetch(manualUrl);
         let manualDataLoaded = false;
         
         if (manualResp.ok) {
@@ -1690,6 +1693,7 @@ function App() {
 
     const payload = {
       patient_id: patientData.patient_id,
+      exam_date: currentExamDate || null,
       image_updates: imageUpdates.length > 0 ? imageUpdates : null,
       ...manualDiagnosisPayload,
     };
