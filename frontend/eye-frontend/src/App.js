@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef, useMemo, useLayoutEffect } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 
 const renderMarkdownContent = (content) => {
   if (!content) return '';
@@ -65,14 +65,37 @@ const IconButton = ({ children, onClick, className = '' }) => (
 
 // Reselect Image Modal Component
 const ReselectImageModal = ({ isOpen, onClose, allImages, onSelectImages, selectedImageIds }) => {
-  const [currentSelection, setCurrentSelection] = useState([...selectedImageIds]);
+  // Fixed slot configuration with proper order: 右眼CFP, 左眼CFP, 右眼外眼照, 左眼外眼照
+  const FIXED_SLOTS = [
+    { index: 0, type: '右眼CFP', label: '槽位 1 - 右眼CFP (Slot 1 - Right Eye CFP)' },
+    { index: 1, type: '左眼CFP', label: '槽位 2 - 左眼CFP (Slot 2 - Left Eye CFP)' },
+    { index: 2, type: '右眼外眼照', label: '槽位 3 - 右眼外眼照 (Slot 3 - Right Eye External)' },
+    { index: 3, type: '左眼外眼照', label: '槽位 4 - 左眼外眼照 (Slot 4 - Left Eye External)' }
+  ];
+
+  const [currentSelection, setCurrentSelection] = useState([null, null, null, null]);
 
   useEffect(() => {
-    setCurrentSelection([...selectedImageIds]);
+    // Initialize with 4 slots, preserving existing selections
+    const newSelection = [null, null, null, null];
+    (Array.isArray(selectedImageIds) ? selectedImageIds : []).forEach((id, idx) => {
+      if (idx < 4) {
+        newSelection[idx] = id;
+      }
+    });
+    setCurrentSelection(newSelection);
   }, [selectedImageIds, isOpen]);
 
   const handleImageClick = (imageId, slotIndex) => {
     const newSelection = [...currentSelection];
+    
+    // If clicking the same image already selected in this slot, deselect it
+    if (newSelection[slotIndex] === imageId) {
+      newSelection[slotIndex] = null;
+      setCurrentSelection(newSelection);
+      return;
+    }
+    
     const imageAlreadySelectedInAnotherSlot = newSelection.findIndex((id, index) => id === imageId && index !== slotIndex);
 
     // If the image is already selected in another slot, swap them
@@ -87,8 +110,14 @@ const ReselectImageModal = ({ isOpen, onClose, allImages, onSelectImages, select
     setCurrentSelection(newSelection);
   };
 
+  const handleClearSlot = (slotIndex) => {
+    const newSelection = [...currentSelection];
+    newSelection[slotIndex] = null;
+    setCurrentSelection(newSelection);
+  };
+
   const handleSubmit = () => {
-    onSelectImages(currentSelection);
+    onSelectImages([...currentSelection]);
     onClose();
   };
 
@@ -96,32 +125,85 @@ const ReselectImageModal = ({ isOpen, onClose, allImages, onSelectImages, select
 
   return (
     <div className="fixed inset-0 bg-gray-600 bg-opacity-75 flex justify-center items-center z-50">
-      <div className="bg-white p-6 rounded-lg shadow-xl w-11/12 max-w-2xl max-h-[90vh] overflow-y-auto">
+      <div className="bg-white p-6 rounded-lg shadow-xl w-11/12 max-w-6xl max-h-[90vh] overflow-y-auto">
         <h2 className="text-xl font-bold mb-4">重新选择图片 (Reselect Images)</h2>
-        <p className="text-sm text-gray-600 mb-4">Click an image below, then click one of the 4 slots to assign it. Click the same slot to deselect. You can also drag images to swap slots.</p>
+        <p className="text-sm text-gray-600 mb-4">
+          点击图片选择到对应槽位。再次点击已选图片可取消选择。标签可能不准确，请根据图像内容选择。
+          <br />
+          (Click an image to select it for a slot. Click again to deselect. Labels may be inaccurate - select based on actual image content.)
+        </p>
 
-        {currentSelection.map((selectedId, slotIndex) => (
-          <div key={slotIndex} className="mb-4">
-            <h3 className="text-md font-semibold mb-2">Slot {slotIndex + 1} ({allImages.find(img => img.id === selectedId)?.type || 'Empty'})</h3>
-            <div className="flex flex-wrap gap-2 justify-center border p-2 rounded-md bg-gray-50 min-h-[100px]">
-              {allImages.map(image => (
-                <div
-                  key={image.id}
-                  className={`relative cursor-pointer border-2 rounded-md overflow-hidden
-                    ${currentSelection[slotIndex] === image.id ? 'border-blue-500 ring-2 ring-blue-500' : 'border-transparent'}
-                    ${currentSelection.includes(image.id) && currentSelection[slotIndex] !== image.id ? 'opacity-50' : ''}
-                    hover:border-blue-300 transition-all duration-150`}
-                  onClick={() => handleImageClick(image.id, slotIndex)}
-                >
-                  <img src={`data:image/png;base64,${image.base64_data}`} alt={image.type} className="w-24 h-24 object-cover" />
-                  <div className="absolute bottom-0 left-0 right-0 bg-black bg-opacity-50 text-white text-xs p-1 text-center truncate">
-                    {image.type}
-                  </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+          {FIXED_SLOTS.map((slot) => {
+            const selectedId = currentSelection[slot.index];
+            const selectedImage = selectedId ? allImages.find(img => img.id === selectedId) : null;
+            
+            return (
+              <div key={slot.index} className="border-2 border-gray-300 rounded-lg p-3 bg-gray-50">
+                <div className="flex justify-between items-center mb-2">
+                  <h3 className="text-sm font-semibold text-gray-700">{slot.label}</h3>
+                  {selectedId && (
+                    <button
+                      onClick={() => handleClearSlot(slot.index)}
+                      className="text-xs text-red-600 hover:text-red-800 underline"
+                    >
+                      清除 (Clear)
+                    </button>
+                  )}
                 </div>
-              ))}
-            </div>
-          </div>
-        ))}
+                
+                {/* Currently selected image for this slot */}
+                {selectedImage && (
+                  <div className="mb-3 border-2 border-blue-500 rounded-md overflow-hidden bg-blue-50">
+                    <img 
+                      src={`data:image/png;base64,${selectedImage.base64_data}`} 
+                      alt={selectedImage.type} 
+                      className="w-full h-32 object-cover" 
+                    />
+                    <div className="bg-blue-500 text-white text-xs p-1 text-center">
+                      已选: {selectedImage.type}
+                    </div>
+                  </div>
+                )}
+                
+                {/* All available images - user can select any image for any slot */}
+                <div className="flex flex-wrap gap-2 justify-start max-h-[200px] overflow-y-auto p-1">
+                  {allImages.map(image => {
+                    const isSelectedInThisSlot = currentSelection[slot.index] === image.id;
+                    const isSelectedInOtherSlot = currentSelection.includes(image.id) && !isSelectedInThisSlot;
+                    const isRecommended = image.type === slot.type;
+                    
+                    return (
+                      <div
+                        key={image.id}
+                        className={`relative cursor-pointer border-2 rounded-md overflow-hidden transition-all duration-150
+                          ${isSelectedInThisSlot ? 'border-blue-500 ring-2 ring-blue-500' : 
+                            isRecommended ? 'border-green-400' : 'border-gray-300'}
+                          ${isSelectedInOtherSlot ? 'opacity-40' : 'opacity-100'}
+                          hover:border-blue-400 hover:shadow-md`}
+                        onClick={() => handleImageClick(image.id, slot.index)}
+                      >
+                        <img 
+                          src={`data:image/png;base64,${image.base64_data}`} 
+                          alt={image.type} 
+                          className="w-20 h-20 object-cover" 
+                        />
+                        {isRecommended && (
+                          <div className="absolute top-0 right-0 bg-green-500 text-white text-[10px] px-1 rounded-bl">
+                            推荐
+                          </div>
+                        )}
+                        <div className="absolute bottom-0 left-0 right-0 bg-black bg-opacity-60 text-white text-[10px] p-0.5 text-center truncate">
+                          {image.type}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })}
+        </div>
 
         <div className="flex justify-end gap-3 mt-6">
           <button
@@ -140,6 +222,185 @@ const ReselectImageModal = ({ isOpen, onClose, allImages, onSelectImages, select
       </div>
     </div>
   );
+};
+
+const DEFAULT_DISEASE_INFO = {
+  青光眼: { 
+    chinese: '青光眼', 
+    english: 'Glaucoma',
+    fullName: '青光眼 (Glaucoma)',
+    shortName: 'Glaucoma',
+    category: 'glaucoma',
+    color: 'text-purple-600'
+  },
+  糖网: { 
+    chinese: '糖网', 
+    english: 'Diabetic Retinopathy',
+    fullName: '糖网 (Diabetic Retinopathy)',
+    shortName: 'DR',
+    category: 'retinal',
+    color: 'text-red-600'
+  },
+  AMD: { 
+    chinese: '年龄相关性黄斑变性', 
+    english: 'Age-related Macular Degeneration',
+    fullName: '年龄相关性黄斑变性 (Age-related Macular Degeneration)',
+    shortName: 'AMD',
+    category: 'macular',
+    color: 'text-orange-600'
+  },
+  病理性近视: { 
+    chinese: '病理性近视', 
+    english: 'Pathological Myopia',
+    fullName: '病理性近视 (Pathological Myopia)',
+    shortName: 'PM',
+    category: 'macular',
+    color: 'text-yellow-600'
+  },
+  RVO: { 
+    chinese: '视网膜静脉阻塞', 
+    english: 'Retinal Vein Occlusion',
+    fullName: '视网膜静脉阻塞 (Retinal Vein Occlusion)',
+    shortName: 'RVO',
+    category: 'vascular',
+    color: 'text-pink-600'
+  },
+  RAO: { 
+    chinese: '视网膜动脉阻塞', 
+    english: 'Retinal Artery Occlusion',
+    fullName: '视网膜动脉阻塞 (Retinal Artery Occlusion)',
+    shortName: 'RAO',
+    category: 'vascular',
+    color: 'text-rose-600'
+  },
+  视网膜脱离: { 
+    chinese: '视网膜脱离', 
+    english: 'Retinal Detachment',
+    fullName: '视网膜脱离 (Retinal Detachment)',
+    shortName: 'RD',
+    category: 'retinal',
+    color: 'text-indigo-600'
+  },
+  其它视网膜病: { 
+    chinese: '其它视网膜病', 
+    english: 'Other Retinal Diseases',
+    fullName: '其它视网膜病 (Other Retinal)',
+    shortName: 'Other Retinal',
+    category: 'retinal',
+    color: 'text-cyan-600'
+  },
+  其它黄斑病变: { 
+    chinese: '其它黄斑病变', 
+    english: 'Other Macular Diseases',
+    fullName: '其它黄斑病变 (Other Macular)',
+    shortName: 'Other Macular',
+    category: 'macular',
+    color: 'text-teal-600'
+  },
+  其它眼底病变: {
+    chinese: '其它眼底病变',
+    english: 'Other Fundus Diseases',
+    fullName: '其它眼底病变 (Other Fundus Diseases)',
+    shortName: 'Other Fundus',
+    category: 'fundus',
+    color: 'text-teal-700'
+  },
+  白内障: {
+    chinese: '白内障',
+    english: 'Cataract',
+    fullName: '白内障 (Cataract)',
+    shortName: 'Cataract',
+    category: 'lens',
+    color: 'text-blue-600'
+  },
+  正常: {
+    chinese: '正常',
+    english: 'Normal',
+    fullName: '正常 (Normal)',
+    shortName: 'Normal',
+    category: 'normal',
+    color: 'text-green-600',
+    is_normal: true
+  }
+};
+
+const DEFAULT_DISEASE_ORDER = [
+  '青光眼','糖网','AMD','病理性近视','RVO','RAO','视网膜脱离','其它视网膜病','其它黄斑病变','白内障','正常'
+];
+
+const MANUAL_DISEASE_INFO = {
+  青光眼: {
+    chinese: '青光眼',
+    english: 'Glaucoma',
+    fullName: '青光眼 (Glaucoma)',
+    shortName: 'Glaucoma'
+  },
+  糖网: {
+    chinese: '糖网',
+    english: 'Diabetic Retinopathy',
+    fullName: '糖网 (Diabetic Retinopathy)',
+    shortName: 'DR'
+  },
+  AMD: {
+    chinese: '年龄相关性黄斑变性',
+    english: 'Age-related Macular Degeneration',
+    fullName: '年龄相关性黄斑变性 (Age-related Macular Degeneration)',
+    shortName: 'AMD'
+  },
+  病理性近视: {
+    chinese: '病理性近视',
+    english: 'Pathological Myopia',
+    fullName: '病理性近视 (Pathological Myopia)',
+    shortName: 'PM'
+  },
+  高度近视: {
+    chinese: '高度近视',
+    english: 'High Myopia',
+    fullName: '高度近视 (High Myopia)',
+    shortName: 'High Myopia'
+  },
+  RVO: {
+    chinese: '视网膜静脉阻塞',
+    english: 'Retinal Vein Occlusion',
+    fullName: '视网膜静脉阻塞 (RVO)',
+    shortName: 'RVO'
+  },
+  RAO: {
+    chinese: '视网膜动脉阻塞',
+    english: 'Retinal Artery Occlusion',
+    fullName: '视网膜动脉阻塞 (RAO)',
+    shortName: 'RAO'
+  },
+  视网膜脱离: {
+    chinese: '视网膜脱离',
+    english: 'Retinal Detachment',
+    fullName: '视网膜脱离 (Retinal Detachment)',
+    shortName: 'RD'
+  },
+  其它视网膜病: {
+    chinese: '其它视网膜病',
+    english: 'Other Retinal Diseases',
+    fullName: '其它视网膜病 (Other Retinal)',
+    shortName: 'Other Retinal'
+  },
+  其它黄斑病变: {
+    chinese: '其它黄斑病变',
+    english: 'Other Macular Diseases',
+    fullName: '其它黄斑病变 (Other Macular)',
+    shortName: 'Other Macular'
+  },
+  白内障: {
+    chinese: '白内障',
+    english: 'Cataract',
+    fullName: '白内障 (Cataract)',
+    shortName: 'Cataract'
+  },
+  正常: {
+    chinese: '正常',
+    english: 'Normal',
+    fullName: '正常 (Normal)',
+    shortName: 'Normal'
+  }
 };
 
 // New Expanded Image Modal Component
@@ -180,13 +441,6 @@ const ConsultationInfoSection = ({ consultationData, onChange, onSubmit, isSubmi
     if (s === 'female') return '女';
     if (s === 'other') return '其他';
     return g; // already human-entered or unknown, keep as-is
-  };
-
-  // Helpers
-  const ensureEyeField = (data, eye) => {
-    const eyeField = eye === 'left' ? 'leftEye' : eye === 'right' ? 'rightEye' : 'bothEyes';
-    if (!data[eyeField]) data[eyeField] = {};
-    return eyeField;
   };
 
   const getEyeData = (eye) => {
@@ -465,13 +719,13 @@ function App() {
   const [patientData, setPatientData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [selectedDisplayImages, setSelectedDisplayImages] = useState([]); // Stores image IDs for the 4 display slots
+  const [selectedDisplayImages, setSelectedDisplayImages] = useState([null, null, null, null]); // Slot-aligned image IDs (may include null)
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitMessage, setSubmitMessage] = useState('');
   const [isExpandedImageModalOpen, setIsExpandedImageModalOpen] = useState(false); // New state for expanded image modal
   const [expandedImageInfo, setExpandedImageInfo] = useState(null); // Stores info of the image to expand
-  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false); // Track unsaved changes
+  const [, setHasUnsavedChanges] = useState(false); // Track unsaved changes (value unused)
   
   // New states for decoupled manual diagnosis
   const [manualDiagnosis, setManualDiagnosis] = useState({
@@ -494,10 +748,6 @@ function App() {
   const sideChatScrollRef = useRef(null);
   const [autoScrollChat, setAutoScrollChat] = useState(true);
 
-  // ADD: 左侧AI容器ref + 右侧卡片高度
-  const leftAIContainerRef = useRef(null);
-  const [chatCardHeightPx, setChatCardHeightPx] = useState(null);
-
   // MOVE HERE: Declare autoStartRef BEFORE any code that uses it
   const autoStartRef = useRef({});
 
@@ -515,10 +765,13 @@ function App() {
   const [showNameSuggestions, setShowNameSuggestions] = useState(false);
   const [sameNameConsultations, setSameNameConsultations] = useState([]);
   const [showConsultationSelector, setShowConsultationSelector] = useState(false);
-  const [consultationLoading, setConsultationLoading] = useState(false);
+
+  // Model management
+  const [availableModels, setAvailableModels] = useState([]);
+  const [activeModelId, setActiveModelId] = useState(null);
+  const [isLoadingModels, setIsLoadingModels] = useState(false);
 
   // New state for threshold management
-  const [activeThresholdSet, setActiveThresholdSet] = useState(0); // 0 for set 1, 1 for set 2
   const [isAlteringThreshold, setIsAlteringThreshold] = useState(false);
 
   // New state for exam instance management
@@ -539,6 +792,35 @@ function App() {
 
   const [llmConfig, setLlmConfig] = useState({ update_prompt: '' });
 
+  // Load available inference models once
+  useEffect(() => {
+    let cancelled = false;
+    const loadModels = async () => {
+      setIsLoadingModels(true);
+      try {
+        const res = await fetch(`${backendUrl}/api/models`, { cache: 'no-store' });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (cancelled) return;
+        setAvailableModels(Array.isArray(data.models) ? data.models : []);
+        setActiveModelId((prev) => {
+          if (prev) return prev;
+          return data.default_model_id || (data.models && data.models[0]?.id) || null;
+        });
+      } catch (err) {
+        console.error('Failed to load inference models:', err);
+      } finally {
+        if (!cancelled) {
+          setIsLoadingModels(false);
+        }
+      }
+    };
+    loadModels();
+    return () => {
+      cancelled = true;
+    };
+  }, [backendUrl, activeModelId, currentExamDate]);
+
 
     // 添加：获取所有可用患者姓名
   const fetchAvailablePatientNames = useCallback(async () => {
@@ -554,7 +836,6 @@ function App() {
   // 添加：根据 ris_exam_id（可选 patient_name）获取问诊信息，并初始化可编辑副本
   const fetchConsultationInfo = useCallback(async (risExamId, searchName = null, autoPickLatestIfMultiple = false) => {
     if (!risExamId) return;
-    setConsultationLoading(true);
     try {
       const url = searchName
         ? `${backendUrl}/api/consultation/${encodeURIComponent(risExamId)}?patient_name=${encodeURIComponent(searchName)}`
@@ -631,7 +912,6 @@ function App() {
       setConsultationData(null);
       setConsultationDataEdited(null);
     } finally {
-      setConsultationLoading(false);
     }
   }, [backendUrl]);
 
@@ -651,19 +931,21 @@ function App() {
 
   // Fetch available exam instances for a patient - MOVED HERE to avoid TDZ error
   const fetchExamInstances = useCallback(async (examId) => {
-    if (!examId) return;
+    if (!examId || !activeModelId) return;
     
     setIsLoadingInstances(true);
     try {
-      const response = await fetch(`${backendUrl}/api/patients/${examId}/instances`);
+      const response = await fetch(`${backendUrl}/api/patients/${examId}/instances?model_id=${encodeURIComponent(activeModelId)}`);
       if (!response.ok) {
         throw new Error(`Failed to fetch exam instances: ${response.status}`);
       }
       const result = await response.json();
       setAvailableExamInstances(result.instances || []);
-      // If we have instances and no current exam date is set, set it to the first (latest)
-      if (result.instances && result.instances.length > 0 && !currentExamDate) {
-        setCurrentExamDate(result.instances[0].exam_date);
+      if (Array.isArray(result.instances) && result.instances.length > 0) {
+        const availableDates = result.instances.map((i) => i.exam_date);
+        if (!currentExamDate || !availableDates.includes(currentExamDate)) {
+          setCurrentExamDate(result.instances[0].exam_date);
+        }
       }
     } catch (err) {
       console.error('Error fetching exam instances:', err);
@@ -671,12 +953,17 @@ function App() {
     } finally {
       setIsLoadingInstances(false);
     }
-  }, [backendUrl, currentExamDate]);
+  }, [backendUrl, activeModelId, currentExamDate]);
 
   // Fetch patient data - MOVED HERE to avoid TDZ error
   const fetchPatientData = useCallback(async (examId, examDate = null) => {
     if (!examId) {
       setError('No ris_exam_id provided in URL. Please add ?ris_exam_id=<exam_id> to the URL.');
+      setLoading(false);
+      return;
+    }
+    if (!activeModelId) {
+      setError('尚未选择可用模型，请稍后再试。');
       setLoading(false);
       return;
     }
@@ -688,9 +975,9 @@ function App() {
 
     try {
       // Build URL with optional exam_date parameter
-      const url = examDate 
-        ? `${backendUrl}/api/patients/${examId}?exam_date=${examDate}`
-        : `${backendUrl}/api/patients/${examId}`;
+      const params = new URLSearchParams({ model_id: activeModelId });
+      if (examDate) params.append('exam_date', examDate);
+      const url = `${backendUrl}/api/patients/${examId}?${params.toString()}`;
       
       console.log(`Fetching from: ${url}`);
       const response = await fetch(url);
@@ -710,9 +997,6 @@ function App() {
       const dataWithOriginal = { ...result, original: JSON.parse(JSON.stringify(result)) };
 
       setPatientData(dataWithOriginal);
-      
-      // Set the active threshold set from patient data
-      setActiveThresholdSet(result.active_threshold_set || 0);
 
       // Initialize the 4 display images in a fixed desired order with latest image selection
       const desiredOrder = ['右眼CFP', '左眼CFP', '右眼外眼照', '左眼外眼照'];
@@ -734,8 +1018,8 @@ function App() {
         }
       }
 
-      // Filter out null values to hide empty slots
-      setSelectedDisplayImages(selectedIds.filter(id => id !== null));
+      // Store slot-aligned selections (may include null)
+      setSelectedDisplayImages(selectedIds);
       setLoading(false);
       setHasUnsavedChanges(false);
 
@@ -776,7 +1060,9 @@ function App() {
         // If no saved manual diagnosis exists, initialize with AI predictions
         if (!manualDataLoaded) {
           // List of disease keys that should be checked in manual diagnosis
-          const diseaseKeys = ['青光眼', '糖网', 'AMD', '病理性近视', '高度近视', 'RVO', 'RAO', '视网膜脱离', '其它视网膜病', '其它黄斑病变', '白内障', '正常'];
+        const diseaseKeys = Array.isArray(result?.diseases) && result.diseases.length > 0
+          ? result.diseases.map((entry) => entry.key)
+          : DEFAULT_DISEASE_ORDER;
           
           // Helper to calculate score (probability relative to threshold)
           const calculateScore = (prob, threshold) => {
@@ -830,7 +1116,9 @@ function App() {
       } catch (e) {
         console.warn('Failed to load manual diagnosis data:', e);
         // Even if loading fails, try to initialize with AI predictions
-        const diseaseKeys = ['青光眼', '糖网', 'AMD', '病理性近视', '高度近视', 'RVO', 'RAO', '视网膜脱离', '其它视网膜病', '其它黄斑病变', '白内障', '正常'];
+        const diseaseKeys = Array.isArray(result?.diseases) && result.diseases.length > 0
+          ? result.diseases.map((entry) => entry.key)
+          : DEFAULT_DISEASE_ORDER;
         
         const calculateScore = (prob, threshold) => {
           if (prob >= threshold * 2) return prob / (threshold * 2);
@@ -884,7 +1172,7 @@ function App() {
       setError(error.message);
       setLoading(false);
     }
-  }, [backendUrl]);
+  }, [backendUrl, activeModelId, currentExamDate]);
 
   // 首次加载：取可用姓名列表
   useEffect(() => {
@@ -908,12 +1196,19 @@ function App() {
         setPatientNameFromUrl(''); // No patient_name in URL
         fetchConsultationInfo(risExamIdFromUrl);
       }
-      // Fetch exam instances first, then load patient data
-      fetchExamInstances(risExamIdFromUrl);
-      fetchPatientData(risExamIdFromUrl);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (!currentExamId || !activeModelId) return;
+    fetchExamInstances(currentExamId);
+  }, [currentExamId, activeModelId, fetchExamInstances]);
+
+  useEffect(() => {
+    if (!currentExamId || !activeModelId) return;
+    fetchPatientData(currentExamId, currentExamDate);
+  }, [currentExamId, currentExamDate, activeModelId, fetchPatientData]);
 
   // 修正：根据索引选择特定问诊记录（使用 backendUrl，并同步可编辑副本）
   const selectConsultationByIndex = async (index, useRefined = true) => {
@@ -980,7 +1275,7 @@ function App() {
 
   // Handle alter threshold
   const handleAlterThreshold = useCallback(async () => {
-    if (!currentExamId) return;
+    if (!currentExamId || !activeModelId) return;
 
     setIsAlteringThreshold(true);
     try {
@@ -989,7 +1284,8 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
           patient_id: currentExamId,
-          exam_date: currentExamDate || null
+          exam_date: currentExamDate || null,
+          model_id: activeModelId
         }),
       });
 
@@ -997,19 +1293,23 @@ function App() {
 
       const result = await response.json();
       
-      // Update the active threshold set
-      setActiveThresholdSet(result.active_threshold_set);
-      
       // Update patient data with new thresholds and diagnosis results
       setPatientData(prevData => ({
         ...prevData,
         prediction_thresholds: result.new_thresholds,
         diagnosis_results: result.updated_diagnosis_results,
-        active_threshold_set: result.active_threshold_set
+        active_threshold_set: result.active_threshold_set,
+        active_threshold_set_id: result.active_threshold_set_id ?? prevData?.active_threshold_set_id,
+        active_threshold_set_index: result.active_threshold_set ?? prevData?.active_threshold_set_index,
+        threshold_sets: result.threshold_sets || prevData?.threshold_sets
       }));
 
+      const thresholdSets = result.threshold_sets || patientData?.threshold_sets || [];
+      const activeIndex = result.active_threshold_set ?? 0;
+      const activeName = thresholdSets[activeIndex]?.name || `阈值套装 ${activeIndex + 1}`;
+
       // Show success message temporarily
-      setSubmitMessage(`阈值已更新至套装 ${result.active_threshold_set + 1} (Thresholds updated to set ${result.active_threshold_set + 1})`);
+      setSubmitMessage(`阈值已更新至 ${activeName}`);
       setTimeout(() => setSubmitMessage(''), 3000);
 
     } catch (error) {
@@ -1019,16 +1319,21 @@ function App() {
     } finally {
       setIsAlteringThreshold(false);
     }
-  }, [backendUrl, currentExamId]);
+  }, [activeModelId, backendUrl, currentExamId, currentExamDate, patientData?.threshold_sets]);
 
   // Handle switching exam dates
-  const handleExamDateSwitch = useCallback(async (examDate) => {
+  const handleExamDateSwitch = useCallback((examDate) => {
     if (!currentExamId || examDate === currentExamDate) return;
     
     setCurrentExamDate(examDate);
-    // Reload patient data for the selected exam date
-    await fetchPatientData(currentExamId, examDate);
-  }, [currentExamId, currentExamDate, fetchPatientData]);
+  }, [currentExamDate, currentExamId]);
+
+  const handleModelChange = useCallback((modelId) => {
+    setAvailableExamInstances([]);
+    setCurrentExamDate(null);
+    setPatientData(null);
+    setActiveModelId(modelId || null);
+  }, []);
 
   // Load LLM prompts config (update_prompt)
   useEffect(() => {
@@ -1074,35 +1379,11 @@ function App() {
     setAutoScrollChat(atBottom);
   };
 
-  // ADD: 同步右侧卡片高度 = 左侧 AI（摘要+概率）总高度
-  useLayoutEffect(() => {
-    const el = leftAIContainerRef.current;
-    if (!el) return;
-
-    const sync = () => {
-      const h = Math.max(0, Math.round(el.getBoundingClientRect().height));
-      setChatCardHeightPx(h || null);
-    };
-
-    // 初次同步
-    sync();
-
-    // 监听左侧高度变化与窗口尺寸变化
-    const ro = new ResizeObserver(sync);
-    ro.observe(el);
-    window.addEventListener('resize', sync);
-
-    return () => {
-      try { ro.disconnect(); } catch {}
-      window.removeEventListener('resize', sync);
-    };
-  }, []);
-
   // Streaming send helper for LLM side chat
   const sendSideChatStreaming = async (text, opts = {}) => {
     const q = (text ?? sideChatInput).trim();
     const reset = !!opts.reset;
-    if (!q || llmLoading) return;
+    if (!q || llmLoading || !activeModelId) return;
 
     const existingMessages = reset ? [] : sideChatMessages;
 
@@ -1131,6 +1412,8 @@ function App() {
       const payload = {
         patient_id: getCurrentPatientId(),
         patient_name: patientNameSearch || null,  // Include patient_name for consultation matching
+        model_id: activeModelId,
+        exam_date: currentExamDate || null,
         messages: history,
       };
 
@@ -1228,196 +1511,106 @@ function App() {
 
   const patientIdPrefix = "病例索引 (Case Index): ";
 
-  // Enhanced disease mapping with both Chinese and English names
-  const diseaseInfo = {
-    青光眼: { 
-      chinese: '青光眼', 
-      english: 'Glaucoma',
-      fullName: '青光眼 (Glaucoma)',
-      shortName: 'Glaucoma',
-      category: 'glaucoma',
-      color: 'text-purple-600'
-    },
-    糖网: { 
-      chinese: '糖网', 
-      english: 'Diabetic Retinopathy',
-      fullName: '糖网 (Diabetic Retinopathy)',
-      shortName: 'DR',
-      category: 'retinal',
-      color: 'text-red-600'
-    },
-    AMD: { 
-      chinese: '年龄相关性黄斑变性', 
-      english: 'Age-related Macular Degeneration',
-      fullName: '年龄相关性黄斑变性 (Age-related Macular Degeneration)',
-      shortName: 'AMD',
-      category: 'macular',
-      color: 'text-orange-600'
-    },
-    病理性近视: { 
-      chinese: '病理性近视', 
-      english: 'Pathological Myopia',
-      fullName: '病理性近视 (Pathological Myopia)',
-      shortName: 'PM',
-      category: 'macular',
-      color: 'text-yellow-600'
-    },
-    RVO: { 
-      chinese: '视网膜静脉阻塞', 
-      english: 'Retinal Vein Occlusion',
-      fullName: '视网膜静脉阻塞 (Retinal Vein Occlusion)',
-      shortName: 'RVO',
-      category: 'vascular',
-      color: 'text-pink-600'
-    },
-    RAO: { 
-      chinese: '视网膜动脉阻塞', 
-      english: 'Retinal Artery Occlusion',
-      fullName: '视网膜动脉阻塞 (Retinal Artery Occlusion)',
-      shortName: 'RAO',
-      category: 'vascular',
-      color: 'text-rose-600'
-    },
-    视网膜脱离: { 
-      chinese: '视网膜脱离', 
-      english: 'Retinal Detachment',
-      fullName: '视网膜脱离 (Retinal Detachment)',
-      shortName: 'RD',
-      category: 'retinal',
-      color: 'text-indigo-600'
-    },
-    其它视网膜病: { 
-      chinese: '其它视网膜病', 
-      english: 'Other Retinal Diseases',
-      fullName: '其它视网膜病 (Other Retinal)',
-      shortName: 'Other Retinal',
-      category: 'retinal',
-      color: 'text-cyan-600'
-    },
-    其它黄斑病变: { 
-      chinese: '其它黄斑病变', 
-      english: 'Other Macular Diseases',
-      fullName: '其它黄斑病变 (Other Macular)',
-      shortName: 'Other Macular',
-      category: 'macular',
-      color: 'text-teal-600'
-    },
-    其它眼底病变: {
-      chinese: '其它眼底病变',
-      english: 'Other Fundus Diseases',
-      fullName: '其它眼底病变 (Other Fundus Diseases)',
-      shortName: 'Other Fundus',
-      category: 'fundus',
-      color: 'text-teal-700'
-    },
-    白内障: { 
-      chinese: '白内障', 
-      english: 'Cataract',
-      fullName: '白内障 (Cataract)',
-      shortName: 'Cataract',
-      category: 'lens',
-      color: 'text-blue-600'
-    },
-    正常: { 
-      chinese: '正常', 
-      english: 'Normal',
-      fullName: '正常 (Normal)',
-      shortName: 'Normal',
-      category: 'normal',
-      color: 'text-green-600'
-    }
-  };
+  const diseaseHierarchyNodes = useMemo(() => {
+    const entries = Array.isArray(patientData?.diseases) && patientData.diseases.length > 0
+      ? patientData.diseases
+      : DEFAULT_DISEASE_ORDER.map((key) => ({
+          key,
+          parent_key: DEFAULT_DISEASE_INFO[key]?.parent_key || null,
+          is_normal: DEFAULT_DISEASE_INFO[key]?.is_normal || false,
+        }));
+
+    const entryMap = {};
+    entries.forEach((entry) => {
+      if (entry?.key) {
+        entryMap[entry.key] = entry;
+      }
+    });
+
+    const childrenMap = {};
+    entries.forEach((entry) => {
+      if (!entry?.key) return;
+      const parent = entry.parent_key || null;
+      if (!childrenMap[parent]) {
+        childrenMap[parent] = [];
+      }
+      childrenMap[parent].push(entry);
+    });
+
+    const ordered = [];
+    const visited = new Set();
+
+    const visit = (entry, depth) => {
+      if (!entry?.key || visited.has(entry.key)) return;
+      visited.add(entry.key);
+      ordered.push({ key: entry.key, depth, entry });
+      (childrenMap[entry.key] || []).forEach((child) => visit(child, depth + 1));
+    };
+
+    const roots = entries.filter((entry) => {
+      const parent = entry.parent_key;
+      return !parent || !entryMap[parent];
+    });
+
+    const orderedRoots = roots.length > 0 ? roots : entries;
+    orderedRoots.forEach((entry) => visit(entry, 0));
+    return ordered;
+  }, [patientData?.diseases]);
+
+  const diseaseOrder = diseaseHierarchyNodes.length
+    ? diseaseHierarchyNodes.map((node) => node.key)
+    : DEFAULT_DISEASE_ORDER;
+
+  const diseaseDepthMap = useMemo(() => {
+    const depthMap = {};
+    diseaseHierarchyNodes.forEach(({ key, depth }) => {
+      depthMap[key] = depth || 0;
+    });
+    return depthMap;
+  }, [diseaseHierarchyNodes]);
 
   // Manual diagnosis diseases (decoupled from AI predictions)
-  const manualDiseaseInfo = {
-    青光眼: { 
-      chinese: '青光眼', 
-      english: 'Glaucoma',
-      fullName: '青光眼 (Glaucoma)',
-      shortName: 'Glaucoma'
-    },
-    糖网: { 
-      chinese: '糖网', 
-      english: 'Diabetic Retinopathy',
-      fullName: '糖网 (Diabetic Retinopathy)',
-      shortName: 'DR'
-    },
-    AMD: { 
-      chinese: '年龄相关性黄斑变性', 
-      english: 'Age-related Macular Degeneration',
-      fullName: '年龄相关性黄斑变性 (Age-related Macular Degeneration)',
-      shortName: 'AMD'
-    },
-    病理性近视: { 
-      chinese: '病理性近视', 
-      english: 'Pathological Myopia',
-      fullName: '病理性近视 (Pathological Myopia)',
-      shortName: 'PM'
-    },
-    高度近视: { 
-      chinese: '豹纹状眼底', 
-      english: 'Leopard Fundus',
-      fullName: '豹纹状眼底 (Leopard Fundus)',
-      shortName: 'Leopard Fundus'
-    },
-    RVO: { 
-      chinese: '视网膜静脉阻塞', 
-      english: 'Retinal Vein Occlusion',
-      fullName: '视网膜静脉阻塞 (Retinal Vein Occlusion)',
-      shortName: 'RVO'
-    },
-    RAO: { 
-      chinese: '视网膜动脉阻塞', 
-      english: 'Retinal Artery Occlusion',
-      fullName: '视网膜动脉阻塞 (Retinal Artery Occlusion)',
-      shortName: 'RAO'
-    },
-    视网膜脱离: { 
-      chinese: '视网膜脱离', 
-      english: 'Retinal Detachment',
-      fullName: '视网膜脱离 (Retinal Detachment)',
-      shortName: 'RD'
-    },
-    其它视网膜病: { 
-      chinese: '其它视网膜病', 
-      english: 'Other Retinopathy',
-      fullName: '其它视网膜病 (Other Retinopathy)',
-      shortName: 'Other Retinal'
-    },
-    其它黄斑病变: { 
-      chinese: '其它黄斑病变', 
-      english: 'Other Maculopathy',
-      fullName: '其它黄斑病变 (Other Maculopathy)',
-      shortName: 'Other Macular'
-    },
-    白内障: { 
-      chinese: '白内障', 
-      english: 'Cataract',
-      fullName: '白内障 (Cataract)',
-      shortName: 'Cataract'
-    },
-    正常: { 
-      chinese: '正常', 
-      english: 'Normal',
-      fullName: '正常 (Normal)',
-      shortName: 'Normal'
-    }
-  };
+  const manualDiseaseInfo = MANUAL_DISEASE_INFO;
 
-  // Keep the old diseaseNames for backward compatibility
-  const diseaseNames = Object.keys(diseaseInfo).reduce((acc, key) => {
-    acc[key] = diseaseInfo[key].english;
-    return acc;
-  }, {});
-
-  // Order of diseases for display (match backend model fields)
-  const diseaseOrder = [
-    '青光眼','糖网','AMD','病理性近视','RVO','RAO','视网膜脱离','其它视网膜病','其它黄斑病变','白内障','正常'
-  ];
+  const activeThresholdSetIndex = patientData?.active_threshold_set_index ?? patientData?.active_threshold_set ?? 0;
+  const activeThresholdSetMeta = patientData?.threshold_sets?.[activeThresholdSetIndex];
+  const activeThresholdSetLabel = activeThresholdSetMeta?.name || `阈值套装 ${activeThresholdSetIndex + 1}`;
 
   const summaryMergeGroups = [
     { key: '其它眼底病变', members: ['其它视网膜病', '其它黄斑病变'] }
   ];
+
+  const diseaseInfo = useMemo(() => {
+    if (Array.isArray(patientData?.diseases) && patientData.diseases.length > 0) {
+      const mapped = {};
+      patientData.diseases.forEach((entry) => {
+        if (!entry || !entry.key) return;
+        const defaults = DEFAULT_DISEASE_INFO[entry.key] || {};
+        mapped[entry.key] = {
+          chinese: entry.label_cn || defaults.chinese || entry.key,
+          english: entry.label_en || defaults.english || entry.key,
+          fullName: entry.full_name || entry.label_cn || defaults.fullName || entry.key,
+          shortName: entry.short_name || defaults.shortName || entry.key,
+          category: entry.category || defaults.category || 'other',
+          color: entry.color || defaults.color || 'text-gray-600',
+          is_normal: entry.is_normal ?? defaults.is_normal ?? false,
+          parent_key: entry.parent_key ?? defaults.parent_key ?? null
+        };
+      });
+      return { ...DEFAULT_DISEASE_INFO, ...mapped };
+    }
+    return DEFAULT_DISEASE_INFO;
+  }, [patientData]);
+
+  const normalDiseaseKeys = useMemo(() => {
+    const set = new Set();
+    Object.entries(diseaseInfo).forEach(([key, info]) => {
+      if (info?.is_normal) {
+        set.add(key);
+      }
+    });
+    return set;
+  }, [diseaseInfo]);
 
   // Map raw probability p (0-1) to visual width so that threshold t maps to 0.5
   // Linear piecewise: [0,t] -> [0,0.5], [t,1] -> [0.5,1]. This keeps monotonicity.
@@ -1474,98 +1667,54 @@ function App() {
     return merged;
   };
 
-  // Helper function to deep compare two objects
-  const isDataEqual = (a, b) => JSON.stringify(a) === JSON.stringify(b);
-
-  // Build a natural Chinese summary per eye; skip '正常' in secondary mentions
-  const buildEyeSummary = (eyeKey) => {
-    try {
-      const ranked = getSummaryRankingItems(eyeKey);
-      if (ranked.length === 0) return '';
-      const eyeLabel = eyeKey === 'left_eye' ? '左眼' : '右眼';
-      const topThree = ranked.slice(0, 3);
-      const [top] = topThree;
-      if (!top) return '';
-
-      const topName = diseaseInfo[top.key]?.chinese || top.key;
-
-      // Choose a natural phrase based on relation to threshold
-      const t = top.t ?? 0.5;
-      const p = top.p ?? 0;
-      let probPhrase = '风险偏高';
-      if (p >= t * 1.2) probPhrase = '风险明显偏高';
-      else if (p >= t) probPhrase = '风险较高';
-      else if (p >= t * 0.8) probPhrase = '风险较高';
-      else probPhrase = '可能存在风险';
-
-      // If top is 正常, use a more natural normal-first sentence
-      if (top.key === '正常') {
-        const others = topThree
-          .slice(1)
-          .filter((x) => x.key !== '正常' && (x.p ?? 0) >= 0.2 * (x.t ?? 0.5) && x.score > 0)
-          .map((x) => diseaseInfo[x.key]?.chinese || x.key);
-
-        if (others.length === 0) {
-          return `患者${eyeLabel}整体倾向于正常，目前未见明显异常信号。`;
-        }
-        if (others.length === 1) {
-          return `患者${eyeLabel}整体倾向于正常，但建议关注${others[0]}的可能性。`;
-        }
-        return `患者${eyeLabel}整体倾向于正常，但建议关注${others[0]}与${others[1]}的可能性。`;
-      }
-
-      // Build secondary mentions, skipping '正常'
-      const others = topThree
-        .slice(1)
-        .filter((x) => x.key !== '正常' && (x.p ?? 0) >= 0.2 * (x.t ?? 0.5) && x.score > 0)
-        .map((x) => diseaseInfo[x.key]?.chinese || x.key);
-
-      // Main sentence
-      let sentence = `患者${eyeLabel}${topName}的${probPhrase}`;
-
-      // Tail based on others
-      if (others.length === 0) {
-        sentence += '。其余疾病可能性总体较低，建议结合临床综合评估。';
-      } else if (others.length === 1) {
-        sentence += `，还应着重关注${others[0]}的可能性。`;
-      } else {
-        sentence += `，还应着重关注${others[0]}与${others[1]}的可能性。`;
-      }
-
-      return sentence;
-    } catch (e) {
-      console.warn('Failed to build eye summary:', e);
-      return '';
-    }
-  };
-
-  // Compute highlight groups per eye
-  // - Primaries: all diseases crossing threshold (p >= t); if '正常' crosses, show only '正常'
-  // - Secondaries: up to 2 diseases (exclude '正常' and primaries) crossing half-threshold (p >= 0.5*t)
+  // Compute highlight groups per eye with hierarchy awareness.
   const getEyeHighlights = (eyeKey) => {
     const ranked = getSummaryRankingItems(eyeKey);
     if (ranked.length === 0) return { primaries: [], secondaries: [] };
-
-    const topThree = ranked.slice(0, 3);
 
     const enrich = (item) => ({
       key: item.key,
       name: diseaseInfo[item.key]?.chinese || item.key,
       p: item.p,
       t: item.t,
-      status: item.key === '正常'
+      depth: diseaseDepthMap[item.key] || 0,
+      status: normalDiseaseKeys.has(item.key)
         ? '正常'
         : (item.p >= item.t * 1.2 ? '明显偏高' : (item.p >= item.t ? '较高' : (item.p >= item.t * 0.8 ? '接近阈值' : '较低')))
     });
 
-    const primaryItem = topThree[0];
-    const primaries = primaryItem ? [enrich(primaryItem)] : [];
-    const secondaries = topThree
-      .slice(1)
-      .filter((item) => item.key !== '正常' && item.score > 0)
-      .map(enrich);
+    const nonNormalRanked = ranked.filter((item) => !normalDiseaseKeys.has(item.key));
+    const positiveNonNormal = nonNormalRanked.filter((item) => item.p >= item.t);
+    const normalCandidate = ranked.find((item) => normalDiseaseKeys.has(item.key));
 
-    return { primaries, secondaries };
+    if (positiveNonNormal.length > 0) {
+      const primary = positiveNonNormal[0];
+      const secondaryPool = positiveNonNormal.slice(1);
+      const backupPool = nonNormalRanked.filter((item) => item.key !== primary.key);
+      const secondariesSource = secondaryPool.length > 0 ? secondaryPool : backupPool;
+      const secondaryItems = secondariesSource.slice(0, 2);
+      if (normalCandidate && !secondaryItems.some((item) => item.key === normalCandidate.key)) {
+        secondaryItems.push(normalCandidate);
+      }
+      return {
+        primaries: [enrich(primary)],
+        secondaries: secondaryItems.map(enrich)
+      };
+    }
+
+    if (normalCandidate) {
+      return {
+        primaries: [enrich(normalCandidate)],
+        secondaries: nonNormalRanked.slice(0, 3).map(enrich)
+      };
+    }
+
+    const fallbackPrimary = nonNormalRanked[0] || ranked[0];
+    if (!fallbackPrimary) return { primaries: [], secondaries: [] };
+    return {
+      primaries: [enrich(fallbackPrimary)],
+      secondaries: nonNormalRanked.filter((item) => item.key !== fallbackPrimary.key).slice(0, 2).map(enrich)
+    };
   };
 
   // Handler for changes to Image Type or Image Quality dropdowns
@@ -1608,30 +1757,66 @@ function App() {
   };
 
   const handleReselectImages = async (newSelectedIds) => {
-    setSelectedDisplayImages(newSelectedIds);
+    const normalizedSelections = Array.isArray(newSelectedIds) ? [...newSelectedIds] : [];
+    while (normalizedSelections.length < 4) {
+      normalizedSelections.push(null);
+    }
+    if (normalizedSelections.length > 4) {
+      normalizedSelections.length = 4;
+    }
+
+    setSelectedDisplayImages(normalizedSelections);
     setHasUnsavedChanges(true);
     try {
-      const payload = {
-        patient_id: patientData?.patient_id,
-        selected_image_ids: newSelectedIds,
-        exam_date: currentExamDate || null,
-      };
-      const resp = await fetch(`${backendUrl}/api/update_selection`, {
+      if (!activeModelId || !getCurrentPatientId()) return;
+      const response = await fetch(`${backendUrl}/api/update_selection`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ 
+          patient_id: getCurrentPatientId(), 
+          selected_image_ids: normalizedSelections,
+          exam_date: currentExamDate,
+          model_id: activeModelId
+        }),
       });
-      if (!resp.ok) {
-        console.warn('Update selection failed:', resp.status);
+
+      if (!response.ok) {
+        console.warn('Update selection failed:', response.status);
         return;
       }
-      const updated = await resp.json();
-      setPatientData(prev => prev ? ({
-        ...prev,
-        prediction_results: updated.prediction_results || prev.prediction_results,
-        diagnosis_results: updated.diagnosis_results || prev.diagnosis_results,
-        prediction_thresholds: updated.prediction_thresholds || prev.prediction_thresholds,
-      }) : prev);
+      const updated = await response.json();
+      
+      // Force a deep update to ensure React detects the change
+      setPatientData(prev => {
+        if (!prev) return prev;
+        
+        // Create completely new objects to ensure React detects the change
+        const newData = {
+          ...prev,
+          prediction_results: updated.prediction_results ? 
+            JSON.parse(JSON.stringify(updated.prediction_results)) : prev.prediction_results,
+          diagnosis_results: updated.diagnosis_results ? 
+            JSON.parse(JSON.stringify(updated.diagnosis_results)) : prev.diagnosis_results,
+          prediction_thresholds: updated.prediction_thresholds ? 
+            JSON.parse(JSON.stringify(updated.prediction_thresholds)) : prev.prediction_thresholds,
+        };
+        
+        // Also update the original reference to reflect the new predictions
+        if (newData.original) {
+          newData.original = {
+            ...newData.original,
+            prediction_results: newData.prediction_results,
+            diagnosis_results: newData.diagnosis_results,
+            prediction_thresholds: newData.prediction_thresholds,
+          };
+        }
+        
+        return newData;
+      });
+      
+      console.log('Prediction results updated after image reselection:', updated.debug_used_images);
     } catch (e) {
       console.warn('Failed updating selection:', e);
     }
@@ -1684,10 +1869,18 @@ function App() {
         return;
     }
 
+    if (!activeModelId) {
+      setSubmitMessage('请先选择模型');
+      setTimeout(() => setSubmitMessage(''), 3000);
+      setIsSubmitting(false);
+      return;
+    }
+
     const payload = {
       patient_id: patientData.patient_id,
       exam_date: currentExamDate || null,
       image_updates: imageUpdates.length > 0 ? imageUpdates : null,
+      model_id: activeModelId,
       ...manualDiagnosisPayload,
     };
 
@@ -1882,6 +2075,27 @@ function App() {
                   </div>
                 )}
                 
+                {availableModels.length > 0 && (
+                  <div className="flex items-center gap-2 ml-4 px-3 py-1 bg-blue-50 border border-blue-200 rounded-md">
+                    <span className="text-xs font-medium text-gray-600">模型:</span>
+                    <select
+                      value={activeModelId || ''}
+                      onChange={(e) => handleModelChange(e.target.value)}
+                      className="text-sm border border-gray-300 rounded px-2 py-1 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      disabled={isLoadingModels}
+                    >
+                      {availableModels.map(model => (
+                        <option key={model.id} value={model.id}>
+                          {model.name || model.id}
+                        </option>
+                      ))}
+                    </select>
+                    <span className="text-xs text-gray-500">
+                      {isLoadingModels ? '载入中...' : '切换模型结果'}
+                    </span>
+                  </div>
+                )}
+                
                 <div className="flex items-center gap-2">
                   <input
                     type="text"
@@ -1983,7 +2197,9 @@ function App() {
                 {/* Image Display Section */}
                 <div className="relative flex h-full items-center justify-center bg-gray-50 p-6 rounded-xl shadow-inner min-h-[560px]">
                   <div className="flex flex-wrap justify-center gap-6 mx-auto">
-                    {selectedDisplayImages.map((imageId, index) => {
+                    {selectedDisplayImages
+                      .filter((imageId) => imageId)
+                      .map((imageId, index) => {
                       const imgInfo = getDisplayedImageInfo(imageId);
                       return (
                         <div
@@ -1995,7 +2211,7 @@ function App() {
                             <>
                               <img
                                 src={`data:image/png;base64,${imgInfo.base64_data}`}
-                                alt={`Image ${index + 1}`}
+                                alt={imgInfo.type || `第${index + 1}张`}
                                 className="w-full h-48 object-cover border-b border-gray-200 group-hover:opacity-80 transition-opacity"
                               />
                               <div className="p-3 text-sm text-center">
@@ -2046,6 +2262,7 @@ function App() {
                         '较高': '高于阈值 / Above T',
                         '接近阈值': '接近阈值 / Near T',
                         '较低': '低于阈值 / Below T',
+                        '正常': '整体正常 / Normal overall'
                       };
                       return (
                         <div key={eyeKey} className="p-3 rounded-xl bg-white border border-indigo-200 shadow-sm">
@@ -2054,16 +2271,24 @@ function App() {
                             <div className="text-center">
                               {/* Primaries: show all above-threshold or the top one if none above */}
                               <div className="flex flex-col gap-2">
-                                {primaries.map((pItem) => (
-                                  pItem.key === '正常' ? (
+                                {primaries.map((pItem) => {
+                                  const isNormal = normalDiseaseKeys.has(pItem.key);
+                                  const depth = pItem.depth || 0;
+                                  const label = diseaseInfo[pItem.key]?.chinese || pItem.name;
+                                  return isNormal ? (
                                     <div key={pItem.key}>
                                       <div className="mt-1 text-xs text-gray-600">总体判断 (Overall)</div>
-                                      <div className="text-lg md:text-xl font-semibold text-green-700">正常 (Normal)</div>
+                                      <div className="text-lg md:text-xl font-semibold text-green-700">
+                                        {label || '正常'}
+                                      </div>
                                     </div>
                                   ) : (
                                     <div key={pItem.key}>
                                       <div className="text-xs text-gray-600">首要考虑 (Primary)</div>
-                                      <div className="text-base md:text-lg font-semibold text-gray-900">{pItem.name}</div>
+                                      <div className="text-base md:text-lg font-semibold text-gray-900 flex items-center justify-center gap-1">
+                                        {depth > 0 && <span className="text-gray-400 text-xs">↳</span>}
+                                        <span>{label}</span>
+                                      </div>
                                       <div className="flex items-center justify-center gap-2 mt-1">
                                         <span className="inline-flex items-center px-2 py-0.5 rounded bg-blue-50 text-blue-800 text-xs border border-blue-200">
                                           P {formatProb(pItem.p)} · T {formatProb(pItem.t)}
@@ -2073,6 +2298,7 @@ function App() {
                                             pItem.status === '明显偏高' ? 'bg-red-50 text-red-800 border-red-200' :
                                             pItem.status === '较高' ? 'bg-orange-50 text-orange-800 border-orange-200' :
                                             pItem.status === '接近阈值' ? 'bg-yellow-50 text-yellow-800 border-yellow-200' :
+                                            pItem.status === '正常' ? 'bg-green-50 text-green-700 border-green-200' :
                                             'bg-gray-50 text-gray-700 border-gray-200'
                                           }`
                                         }>
@@ -2080,22 +2306,28 @@ function App() {
                                         </span>
                                       </div>
                                     </div>
-                                  )
-                                ))}
+                                  );
+                                })}
                               </div>
 
                               {secondaries.length > 0 && (
                                 <div className="mt-2">
                                   <div className="text-xs font-medium text-gray-500 tracking-wide">次要关注 (Secondary)</div>
                                   <div className="mt-1 flex flex-wrap justify-center gap-1">
-                                    {secondaries.map((o) => (
-                                      <span
-                                        key={o.key}
-                                        className="px-2 py-0.5 rounded-full bg-amber-400/10 text-amber-700 text-xs border border-amber-300/40 opacity-85"
-                                     >
-                                        {o.name}
-                                      </span>
-                                    ))}
+                                    {secondaries.map((o) => {
+                                      const depth = o.depth || 0;
+                                      return (
+                                        <span
+                                          key={o.key}
+                                          className={`px-2 py-0.5 rounded-full bg-amber-400/10 text-amber-700 text-xs border border-amber-300/40 opacity-85 flex items-center gap-1 ${
+                                            depth ? 'pl-3' : ''
+                                          }`}
+                                        >
+                                          {depth > 0 && <span className="text-gray-400 text-[10px]">↳</span>}
+                                          {o.name}
+                                        </span>
+                                      );
+                                    })}
                                   </div>
                                 </div>
                               )}
@@ -2123,7 +2355,7 @@ function App() {
                         </tr>
                       </thead>
                       <tbody>
-                        {diseaseOrder.map(dk => {
+                        {diseaseHierarchyNodes.map(({ key: dk, depth }) => {
                           const thresholds = patientData?.prediction_thresholds || {};
                           const t = thresholds[dk] ?? 0.5;
                           const leftProb = patientData?.prediction_results?.left_eye?.[dk] ?? 0.0;
@@ -2133,12 +2365,17 @@ function App() {
                           const clamp = (v) => Math.min(100, Math.max(0, v));
                           const leftWidth = clamp(leftWidthRaw);
                           const rightWidth = clamp(rightWidthRaw);
+                          const info = diseaseInfo[dk] || {};
+                          const isChild = depth > 0;
                           return (
                             <tr key={dk} className="border-t border-gray-100">
                               <td className="p-1 align-middle text-gray-700 whitespace-nowrap font-medium">
-                                <div className="flex flex-col">
-                                  <span className="font-semibold text-gray-800">{diseaseInfo[dk].chinese}</span>
-                                  <span className="text-xs text-gray-500">{diseaseInfo[dk].shortName}</span>
+                                <div className={`flex flex-col ${isChild ? 'pl-3 border-l border-gray-200 ml-1' : ''}`}>
+                                  <span className="font-semibold text-gray-800 flex items-center gap-1">
+                                    {isChild && <span className="text-gray-400 text-[10px]">↳</span>}
+                                    {info.chinese || dk}
+                                  </span>
+                                  <span className="text-xs text-gray-500">{info.shortName || info.english || dk}</span>
                                 </div>
                               </td>
                               <td className="p-1">
@@ -2146,7 +2383,7 @@ function App() {
                                   <div className="absolute top-0 left-0 h-full bg-green-600/20" style={{ width: `${rightWidth}%` }} />
                                   <div className="absolute top-0 left-1/2 w-0.5 h-full bg-gray-600/70" />
                                   <div className="absolute top-0 h-full flex items-center" style={{ left: `${rightWidth}%`, transform: 'translateX(-50%)' }}
-                                       title={`${diseaseInfo[dk].fullName}: P:${formatProb(rightProb)} T:${formatProb(t)}`}>
+                                       title={`${info.fullName || info.english || dk}: P:${formatProb(rightProb)} T:${formatProb(t)}`}>
                                     <div className="w-0.5 h-full bg-blue-700/70"></div>
                                     <div className="absolute left-1/2 top-1/2 w-1.5 h-1.5 -translate-x-1/2 -translate-y-1/2 rotate-45 bg-blue-600 border border-white shadow-sm" />
                                   </div>
@@ -2161,7 +2398,7 @@ function App() {
                                   <div className="absolute top-0 left-0 h-full bg-green-600/20" style={{ width: `${leftWidth}%` }} />
                                   <div className="absolute top-0 left-1/2 w-0.5 h-full bg-gray-600/70" />
                                   <div className="absolute top-0 h-full flex items-center" style={{ left: `${leftWidth}%`, transform: 'translateX(-50%)' }}
-                                       title={`${diseaseInfo[dk].fullName}: P:${formatProb(leftProb)} T:${formatProb(t)}`}>
+                                       title={`${info.fullName || info.english || dk}: P:${formatProb(leftProb)} T:${formatProb(t)}`}>
                                     <div className="w-0.5 h-full bg-blue-700/70"></div>
                                     <div className="absolute left-1/2 top-1/2 w-1.5 h-1.5 -translate-x-1/2 -translate-y-1/2 rotate-45 bg-blue-600 border border-white shadow-sm" />
                                   </div>
@@ -2429,7 +2666,7 @@ function App() {
                     className={`px-6 py-2.5 rounded-lg shadow-md transition-colors duration-200 text-sm font-semibold
                       ${isAlteringThreshold ? 'bg-blue-300 cursor-not-allowed text-white' : 'bg-blue-600 text-white hover:bg-blue-700'}`}
                   >
-                    {isAlteringThreshold ? '更新中...' : `阈值套装 ${activeThresholdSet + 1} (Alter Threshold)`}
+                    {isAlteringThreshold ? '更新中...' : `${activeThresholdSetLabel} (Alter Threshold)`}
                   </button>
                   <button
                     onClick={handleDiscardChanges}

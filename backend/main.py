@@ -17,7 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from contextlib import asynccontextmanager
 
-from datatype import ImageInfo, EyeDiagnosis, PatientData, SubmitDiagnosisRequest, EyePrediction, EyePredictionThresholds, ManualDiagnosisData, UpdateSelectionRequest, AlterThresholdRequest, CustomDiseases
+from datatype import ImageInfo, PatientData, SubmitDiagnosisRequest, ManualDiagnosisData, UpdateSelectionRequest, AlterThresholdRequest, CustomDiseases
 from patientdataio import load_batch_patient_data, create_batch_dummy_patient_data, load_patient_from_record
 
 import logging
@@ -59,6 +59,14 @@ else:
 
 RAW_JSON_MAX_DAYS = max(1, int(os.getenv("RAW_JSON_MAX_DAYS", "21")))
 
+RAW_JSON_MODELS_PATH_ENV = os.getenv("RAW_JSON_MODELS_PATH")
+if RAW_JSON_MODELS_PATH_ENV and not os.path.isabs(RAW_JSON_MODELS_PATH_ENV):
+    RAW_JSON_MODELS_PATH = os.path.normpath(
+        os.path.join(os.path.dirname(__file__), RAW_JSON_MODELS_PATH_ENV)
+    )
+else:
+    RAW_JSON_MODELS_PATH = RAW_JSON_MODELS_PATH_ENV
+
 EXAMINE_RESULTS_PATH_ENV = os.getenv("EXAMINE_RESULTS_PATH", "../data/examine_results.json")
 if not os.path.isabs(EXAMINE_RESULTS_PATH_ENV):
     EXAMINE_RESULTS_PATH = os.path.normpath(
@@ -69,6 +77,338 @@ else:
 
 INFERENCE_RESULTS_PATH = EXAMINE_RESULTS_PATH
 
+DEFAULT_DISEASES = [
+    {
+        "key": "青光眼",
+        "label_cn": "青光眼",
+        "label_en": "Glaucoma",
+        "short_name": "Glaucoma",
+        "category": "glaucoma",
+        "color": "text-purple-600",
+        "aliases": ["青光眼"]
+    },
+    {
+        "key": "糖网",
+        "label_cn": "糖网",
+        "label_en": "Diabetic Retinopathy",
+        "short_name": "DR",
+        "category": "retinal",
+        "color": "text-red-600",
+        "aliases": ["糖尿病性视网膜病变", "糖网"]
+    },
+    {
+        "key": "AMD",
+        "label_cn": "年龄相关性黄斑变性",
+        "label_en": "Age-related Macular Degeneration",
+        "short_name": "AMD",
+        "category": "macular",
+        "color": "text-orange-600",
+        "aliases": ["年龄相关性黄斑变性", "AMD"]
+    },
+    {
+        "key": "病理性近视",
+        "label_cn": "病理性近视",
+        "label_en": "Pathological Myopia",
+        "short_name": "PM",
+        "category": "macular",
+        "color": "text-yellow-600",
+        "aliases": ["病理性近视"]
+    },
+    {
+        "key": "RVO",
+        "label_cn": "视网膜静脉阻塞",
+        "label_en": "Retinal Vein Occlusion",
+        "short_name": "RVO",
+        "category": "vascular",
+        "color": "text-pink-600",
+        "aliases": ["视网膜静脉阻塞", "视网膜静脉阻塞（RVO）", "RVO"]
+    },
+    {
+        "key": "RAO",
+        "label_cn": "视网膜动脉阻塞",
+        "label_en": "Retinal Artery Occlusion",
+        "short_name": "RAO",
+        "category": "vascular",
+        "color": "text-rose-600",
+        "aliases": ["视网膜动脉阻塞", "视网膜动脉阻塞（RAO）", "RAO"]
+    },
+    {
+        "key": "视网膜脱离",
+        "label_cn": "视网膜脱离",
+        "label_en": "Retinal Detachment",
+        "short_name": "RD",
+        "category": "retinal",
+        "color": "text-indigo-600",
+        "aliases": ["视网膜脱离", "视网膜脱离（RD）"]
+    },
+    {
+        "key": "其它视网膜病",
+        "label_cn": "其它视网膜病",
+        "label_en": "Other Retinal Diseases",
+        "short_name": "Other Retinal",
+        "category": "retinal",
+        "color": "text-cyan-600",
+        "aliases": ["其它视网膜病", "其他视网膜病"]
+    },
+    {
+        "key": "其它黄斑病变",
+        "label_cn": "其它黄斑病变",
+        "label_en": "Other Macular Diseases",
+        "short_name": "Other Macular",
+        "category": "macular",
+        "color": "text-teal-600",
+        "aliases": ["其它黄斑病变", "其他黄斑病变"]
+    },
+    {
+        "key": "其它眼底病变",
+        "label_cn": "其它眼底病变",
+        "label_en": "Other Fundus Diseases",
+        "short_name": "Other Fundus",
+        "category": "fundus",
+        "color": "text-teal-700",
+        "aliases": ["其它眼底病变", "其他眼底病变"]
+    },
+    {
+        "key": "白内障",
+        "label_cn": "白内障",
+        "label_en": "Cataract",
+        "short_name": "Cataract",
+        "category": "lens",
+        "color": "text-blue-600",
+        "aliases": ["白内障"]
+    },
+    {
+        "key": "正常",
+        "label_cn": "正常",
+        "label_en": "Normal",
+        "short_name": "Normal",
+        "category": "normal",
+        "color": "text-green-600",
+        "aliases": ["正常", "Normal"],
+        "is_normal": True
+    },
+]
+
+DEFAULT_DISEASE_META = {entry["key"]: entry for entry in DEFAULT_DISEASES}
+
+DEFAULT_THRESHOLD_SETS = [
+    {
+        "id": "set_1",
+        "name": "阈值套装 1",
+        "description": "基准阈值（F1最优）",
+        "values": {
+            "青光眼": 0.20,
+            "糖网": 0.28,
+            "AMD": 0.25,
+            "病理性近视": 0.18,
+            "RVO": 0.20,
+            "RAO": 0.18,
+            "视网膜脱离": 0.18,
+            "其它视网膜病": 0.25,
+            "其它黄斑病变": 0.23,
+            "其它眼底病变": 0.30,
+            "白内障": 0.28,
+            "正常": 0.50,
+        },
+    },
+    {
+        "id": "set_2",
+        "name": "阈值套装 2",
+        "description": "偏敏感阈值（参考方案）",
+        "values": {
+            "青光眼": 0.18,
+            "糖网": 0.23,
+            "AMD": 0.18,
+            "病理性近视": 0.18,
+            "RVO": 0.18,
+            "RAO": 0.15,
+            "视网膜脱离": 0.15,
+            "其它视网膜病": 0.35,
+            "其它黄斑病变": 0.50,
+            "其它眼底病变": 0.35,
+            "白内障": 0.33,
+            "正常": 0.38,
+        },
+    },
+]
+
+
+def _resolve_model_root(path_value: str) -> str:
+    if not path_value:
+        return RAW_JSON_ROOT
+    if not os.path.isabs(path_value):
+        return os.path.normpath(os.path.join(os.path.dirname(__file__), path_value))
+    return path_value
+
+
+def _normalize_diseases(raw_diseases: Optional[List[Any]]) -> Tuple[List[Dict[str, Any]], Dict[str, str]]:
+    """
+    Normalize disease metadata list and build alias map.
+    Returns (normalized_list, alias_map).
+    """
+    normalized: List[Dict[str, Any]] = []
+    alias_map: Dict[str, str] = {}
+    if not raw_diseases:
+        raw_diseases = DEFAULT_DISEASES
+
+    for item in raw_diseases:
+        if isinstance(item, str):
+            entry = {"key": item}
+        elif isinstance(item, dict):
+            entry = dict(item)
+        else:
+            continue
+
+        key = entry.get("key") or entry.get("name")
+        if not key:
+            continue
+        entry["key"] = key
+
+        defaults = DEFAULT_DISEASE_META.get(key, {})
+        entry.setdefault("label_cn", defaults.get("label_cn", key))
+        entry.setdefault("label_en", defaults.get("label_en", entry["label_cn"]))
+        entry.setdefault("short_name", defaults.get("short_name", entry["label_en"]))
+        entry.setdefault("category", defaults.get("category", "other"))
+        entry.setdefault("color", defaults.get("color", "text-gray-600"))
+
+        aliases = entry.get("aliases") or defaults.get("aliases") or []
+        if isinstance(aliases, str):
+            aliases = [aliases]
+        aliases = [a for a in aliases if isinstance(a, str)]
+        if key not in aliases:
+            aliases.append(key)
+        entry["aliases"] = aliases
+
+        if "is_normal" in entry:
+            entry["is_normal"] = bool(entry["is_normal"])
+        else:
+            entry["is_normal"] = bool(defaults.get("is_normal", False))
+
+        parent_key = entry.get("parent_key")
+        if parent_key is None and defaults.get("parent_key"):
+            parent_key = defaults.get("parent_key")
+        if parent_key:
+            entry["parent_key"] = parent_key
+        else:
+            entry.pop("parent_key", None)
+
+        normalized.append(entry)
+
+        for alias in aliases:
+            alias_map[alias] = key
+            alias_map[alias.lower()] = key
+
+    return normalized, alias_map
+
+
+def _normalize_threshold_sets(raw_sets: Optional[List[Dict[str, Any]]], disease_keys: List[str]) -> List[Dict[str, Any]]:
+    if not raw_sets:
+        raw_sets = DEFAULT_THRESHOLD_SETS
+
+    normalized_sets: List[Dict[str, Any]] = []
+    for idx, item in enumerate(raw_sets):
+        if not isinstance(item, dict):
+            continue
+        set_id = item.get("id") or f"set_{idx + 1}"
+        name = item.get("name") or f"阈值套装 {idx + 1}"
+        description = item.get("description", "")
+        values = item.get("values") or {}
+        normalized_values: Dict[str, float] = {}
+        for disease_key in disease_keys:
+            if disease_key in values:
+                normalized_values[disease_key] = float(values[disease_key])
+            else:
+                normalized_values[disease_key] = 0.5
+        normalized_sets.append({
+            "id": set_id,
+            "name": name,
+            "description": description,
+            "values": normalized_values
+        })
+    return normalized_sets
+
+
+def _load_inference_models_config() -> Dict[str, Dict[str, Any]]:
+    raw_models_str = os.getenv("RAW_JSON_MODELS", "").strip()
+    if not raw_models_str and RAW_JSON_MODELS_PATH:
+        try:
+            with open(RAW_JSON_MODELS_PATH, "r", encoding="utf-8") as f:
+                raw_models_str = f.read()
+        except FileNotFoundError:
+            logger.error("RAW_JSON_MODELS_PATH %s not found", RAW_JSON_MODELS_PATH)
+        except Exception as exc:
+            logger.error("Failed to read RAW_JSON_MODELS_PATH %s: %s", RAW_JSON_MODELS_PATH, exc)
+
+    parsed_models: Any = []
+    if raw_models_str:
+        try:
+            parsed_models = json.loads(raw_models_str)
+        except json.JSONDecodeError:
+            logger.error("Model configuration JSON is invalid; falling back to default dataset")
+            parsed_models = []
+
+    if isinstance(parsed_models, dict):
+        parsed_models = [parsed_models]
+
+    if not parsed_models:
+        parsed_models = [
+            {
+                "id": "default",
+                "name": "默认模型",
+                "priority": 100,
+                "root": RAW_JSON_ROOT_ENV,
+                "diseases": DEFAULT_DISEASES,
+                "threshold_sets": DEFAULT_THRESHOLD_SETS,
+                "default_threshold_set_id": DEFAULT_THRESHOLD_SETS[0]["id"],
+            }
+        ]
+
+    configs: Dict[str, Dict[str, Any]] = {}
+    for idx, raw_entry in enumerate(parsed_models):
+        if not isinstance(raw_entry, dict):
+            continue
+        model_id = raw_entry.get("id") or f"model_{idx + 1}"
+        if model_id in configs:
+            logger.warning("Duplicate model id %s found in RAW_JSON_MODELS; keeping first occurrence", model_id)
+            continue
+
+        diseases, alias_map = _normalize_diseases(raw_entry.get("diseases"))
+        disease_keys = [d["key"] for d in diseases]
+        threshold_sets = _normalize_threshold_sets(raw_entry.get("threshold_sets"), disease_keys)
+        if not threshold_sets:
+            threshold_sets = _normalize_threshold_sets(DEFAULT_THRESHOLD_SETS, disease_keys)
+
+        default_set_id = raw_entry.get("default_threshold_set_id") or threshold_sets[0]["id"]
+        threshold_indices = {s["id"]: idx for idx, s in enumerate(threshold_sets)}
+
+        cfg = {
+            "id": model_id,
+            "name": raw_entry.get("name") or model_id,
+            "priority": int(raw_entry.get("priority", 0)),
+            "root": raw_entry.get("root") or raw_entry.get("path") or RAW_JSON_ROOT_ENV,
+            "abs_root": None,  # resolved below
+            "diseases": diseases,
+            "disease_alias_map": alias_map,
+            "threshold_sets": threshold_sets,
+            "threshold_set_indices": threshold_indices,
+            "default_threshold_set_id": default_set_id if default_set_id in threshold_indices else threshold_sets[0]["id"],
+        }
+        cfg["abs_root"] = _resolve_model_root(cfg["root"])
+        configs[model_id] = cfg
+
+    if not configs:
+        raise RuntimeError("No valid inference model configuration detected")
+
+    return configs
+
+
+MODEL_CONFIGS = _load_inference_models_config()
+ORDERED_MODEL_IDS = sorted(
+    MODEL_CONFIGS.keys(),
+    key=lambda mid: (-MODEL_CONFIGS[mid]["priority"], MODEL_CONFIGS[mid]["name"])
+)
+DEFAULT_MODEL_ID = ORDERED_MODEL_IDS[0]
+
 # --- Data Storage (In-memory cache) ---
 patients_data_cache: Dict[str, PatientData] = {}
 # Storage for manual diagnosis data (separate from AI predictions)
@@ -76,6 +416,51 @@ manual_diagnosis_storage: Dict[str, ManualDiagnosisData] = {}
 # Cache of raw per-image probabilities to avoid disk I/O on reselection
 raw_probs_cache: Dict[str, Dict[str, Any]] = {}
 manual_diagnosis_file_lock = threading.Lock()
+
+
+def _resolve_model_id(model_id: Optional[str]) -> str:
+    if model_id and model_id in MODEL_CONFIGS:
+        return model_id
+    if model_id and model_id not in MODEL_CONFIGS:
+        logger.warning("Requested model_id %s not found; falling back to default %s", model_id, DEFAULT_MODEL_ID)
+    return DEFAULT_MODEL_ID
+
+
+def _get_model_config(model_id: Optional[str] = None) -> Dict[str, Any]:
+    resolved = _resolve_model_id(model_id)
+    return MODEL_CONFIGS[resolved]
+
+
+def _make_patient_cache_key(model_id: str, patient_id: str, exam_date: Optional[str] = None) -> str:
+    suffix = exam_date or "latest"
+    return f"{model_id}::{patient_id}::{suffix}"
+
+
+def _make_raw_cache_key(model_id: str, patient_id: str, exam_date: Optional[str] = None) -> str:
+    return _make_patient_cache_key(model_id, patient_id, exam_date)
+
+
+def _get_cached_patient(patient_id: str, model_id: Optional[str] = None, exam_date: Optional[str] = None) -> Tuple[Optional[str], Optional[PatientData]]:
+    """
+    Retrieve a patient from the cache, returning (model_id, patient).
+    If model_id is None, search across all models.
+    """
+    candidate_models = (
+        [_resolve_model_id(model_id)]
+        if model_id
+        else ORDERED_MODEL_IDS
+    )
+
+    for mid in candidate_models:
+        keys_to_check = []
+        if exam_date:
+            keys_to_check.append(_make_patient_cache_key(mid, patient_id, exam_date))
+        keys_to_check.append(_make_patient_cache_key(mid, patient_id, None))
+        for key in keys_to_check:
+            patient = patients_data_cache.get(key)
+            if patient:
+                return mid, patient
+    return None, None
 
 def _load_manual_diagnosis_store() -> Dict[str, Any]:
     """
@@ -245,27 +630,26 @@ def _stop_background_monitor():
 
 # --- Inference data aggregation (latest dated folders) ---
 _inference_cache_lock = threading.Lock()
-# Changed to support multiple instances per patient: Dict[patient_id, List[instance]]
-# Each instance is a dict with keys: 'data', 'source_date', 'source_file', 'base_dir'
-_inference_patient_records: Dict[str, List[Dict[str, Any]]] = {}
-_inference_loaded_files: List[str] = []
-# Track file modification times to detect changes
-_inference_file_mtimes: Dict[str, float] = {}
+# Changed to support multiple models -> each model holds Dict[patient_id, List[instance]]
+_inference_patient_records: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
+_inference_loaded_files: Dict[str, List[str]] = {}
+_inference_file_mtimes: Dict[str, Dict[str, float]] = {}
 
 
-def _resolve_inference_sources() -> List[tuple]:
-    """Return a list of (json_path, base_dir, label) sorted by newest first."""
-    if os.path.isfile(RAW_JSON_ROOT):
-        return [(RAW_JSON_ROOT, os.path.dirname(RAW_JSON_ROOT), os.path.basename(RAW_JSON_ROOT))]
+def _resolve_inference_sources(model_cfg: Dict[str, Any]) -> List[tuple]:
+    """Return a list of (json_path, base_dir, label) sorted by newest first for the given model."""
+    root_dir = model_cfg.get("abs_root") or RAW_JSON_ROOT
+    if os.path.isfile(root_dir):
+        return [(root_dir, os.path.dirname(root_dir), os.path.basename(root_dir))]
 
-    if not os.path.isdir(RAW_JSON_ROOT):
-        logger.error("RAW_JSON_ROOT does not exist or is not accessible: %s", RAW_JSON_ROOT)
+    if not os.path.isdir(root_dir):
+        logger.error("RAW JSON root does not exist or is not accessible: %s", root_dir)
         return []
 
     entries: List[tuple] = []
     try:
-        for name in os.listdir(RAW_JSON_ROOT):
-            full_dir = os.path.join(RAW_JSON_ROOT, name)
+        for name in os.listdir(root_dir):
+            full_dir = os.path.join(root_dir, name)
             if not os.path.isdir(full_dir):
                 continue
             label = name.strip()
@@ -274,15 +658,15 @@ def _resolve_inference_sources() -> List[tuple]:
                 if os.path.isfile(candidate):
                     entries.append((candidate, full_dir, label))
     except Exception as exc:
-        logger.error("Failed to enumerate inference directories under %s: %s", RAW_JSON_ROOT, exc)
+        logger.error("Failed to enumerate inference directories under %s: %s", root_dir, exc)
         return []
 
     if not entries:
         # Fallback: look for inference_results.json directly under root for backwards compatibility
-        fallback = os.path.join(RAW_JSON_ROOT, "inference_results.json")
+        fallback = os.path.join(root_dir, "inference_results.json")
         if os.path.isfile(fallback):
-            return [(fallback, RAW_JSON_ROOT, os.path.basename(RAW_JSON_ROOT))]
-        logger.warning("No dated inference folders found under %s", RAW_JSON_ROOT)
+            return [(fallback, root_dir, os.path.basename(root_dir))]
+        logger.warning("No dated inference folders found under %s", root_dir)
         return []
 
     # Sort by label descending (newest date first)
@@ -290,106 +674,113 @@ def _resolve_inference_sources() -> List[tuple]:
     return entries[:RAW_JSON_MAX_DAYS]
 
 
-def _refresh_inference_cache(force: bool = False) -> None:
-    global _inference_patient_records, _inference_loaded_files, _inference_file_mtimes
-    sources = _resolve_inference_sources()
-    file_keys = [path for path, _, _ in sources]
+def _refresh_inference_cache(force: bool = False, model_id: Optional[str] = None) -> None:
+    """
+    Refresh cached inference data for one or all models.
+    """
+    target_model_ids = (
+        [_resolve_model_id(model_id)]
+        if model_id
+        else ORDERED_MODEL_IDS
+    )
 
-    with _inference_cache_lock:
-        # Check if we need to reload based on:
-        # 1. Force flag
-        # 2. New files detected (file_keys changed)
-        # 3. Existing files modified (mtime changed)
-        needs_reload = force or file_keys != _inference_loaded_files
-        
-        if not needs_reload:
-            # Check if any existing file has been modified
+    for mid in target_model_ids:
+        model_cfg = MODEL_CONFIGS[mid]
+        sources = _resolve_inference_sources(model_cfg)
+        file_keys = [path for path, _, _ in sources]
+
+        with _inference_cache_lock:
+            patient_records = _inference_patient_records.setdefault(mid, {})
+            loaded_files = _inference_loaded_files.setdefault(mid, [])
+            file_mtimes = _inference_file_mtimes.setdefault(mid, {})
+
+            needs_reload = force or file_keys != loaded_files
+
+            if not needs_reload:
+                for path in file_keys:
+                    try:
+                        current_mtime = os.path.getmtime(path)
+                        if file_mtimes.get(path) != current_mtime:
+                            needs_reload = True
+                            logger.info("Detected modification in %s for model %s", path, mid)
+                            break
+                    except Exception:
+                        needs_reload = True
+                        break
+
+            if not needs_reload and patient_records:
+                continue
+
+            combined: Dict[str, List[Dict[str, Any]]] = {}
+
+            for path, base_dir, label in sources:
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                except Exception as exc:
+                    logger.error("Failed to load inference file %s for model %s: %s", path, mid, exc)
+                    continue
+
+                if not isinstance(data, dict):
+                    logger.warning("Inference file %s did not contain a JSON object", path)
+                    continue
+
+                for pid, payload in data.items():
+                    if not isinstance(payload, dict):
+                        continue
+
+                    instance = {
+                        "data": payload,
+                        "source_date": label,
+                        "source_file": path,
+                        "base_dir": base_dir,
+                        "model_id": mid,
+                    }
+
+                    combined.setdefault(pid, []).append(instance)
+
+            for pid in combined:
+                combined[pid].sort(key=lambda x: x["source_date"], reverse=True)
+
+            _inference_patient_records[mid] = combined
+            _inference_loaded_files[mid] = file_keys
+            mtimes: Dict[str, float] = {}
             for path in file_keys:
                 try:
-                    current_mtime = os.path.getmtime(path)
-                    if path not in _inference_file_mtimes or _inference_file_mtimes[path] != current_mtime:
-                        needs_reload = True
-                        logger.info(f"Detected modification in {path}")
-                        break
+                    mtimes[path] = os.path.getmtime(path)
                 except Exception:
-                    needs_reload = True
-                    break
-        
-        if not needs_reload and _inference_patient_records:
-            return
+                    pass
+            _inference_file_mtimes[mid] = mtimes
 
-        # Build multi-instance structure: patient_id -> list of exam instances
-        combined: Dict[str, List[Dict[str, Any]]] = {}
-
-        for path, base_dir, label in sources:
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-            except Exception as exc:
-                logger.error("Failed to load inference file %s: %s", path, exc)
-                continue
-
-            if not isinstance(data, dict):
-                logger.warning("Inference file %s did not contain a JSON object", path)
-                continue
-
-            for pid, payload in data.items():
-                if not isinstance(payload, dict):
-                    continue
-                
-                # Create instance metadata wrapper
-                instance = {
-                    "data": payload,
-                    "source_date": label,  # The dated folder name (YYYYMMDD)
-                    "source_file": path,
-                    "base_dir": base_dir
-                }
-                
-                # Append to patient's instance list
-                if pid not in combined:
-                    combined[pid] = []
-                combined[pid].append(instance)
-
-        # Sort each patient's instances by source_date descending (newest first)
-        for pid in combined:
-            combined[pid].sort(key=lambda x: x["source_date"], reverse=True)
-
-        _inference_patient_records = combined
-        _inference_loaded_files = file_keys
-        
-        # Update modification times
-        _inference_file_mtimes = {}
-        for path in file_keys:
-            try:
-                _inference_file_mtimes[path] = os.path.getmtime(path)
-            except Exception:
-                pass
-
-        total_instances = sum(len(instances) for instances in combined.values())
-        logger.info(
-            "Loaded %s inference file(s) covering %s patient(s) with %s total exam instance(s)",
-            len(file_keys),
-            len(combined),
-            total_instances
-        )
+            total_instances = sum(len(instances) for instances in combined.values())
+            logger.info(
+                "Model %s loaded %s inference file(s), %s patient(s), %s exam instance(s)",
+                model_cfg["name"],
+                len(file_keys),
+                len(combined),
+                total_instances,
+            )
 
 
-def get_inference_patient_ids() -> List[str]:
-    """Return list of all patient IDs that have at least one exam instance."""
-    _refresh_inference_cache()
+def get_inference_patient_ids(model_id: Optional[str] = None) -> List[str]:
+    """Return list of all patient IDs for a model."""
+    resolved = _resolve_model_id(model_id)
+    _refresh_inference_cache(model_id=resolved)
     with _inference_cache_lock:
-        return list(_inference_patient_records.keys())
+        return list(_inference_patient_records.get(resolved, {}).keys())
 
 
-def get_inference_record(patient_id: str, exam_date: Optional[str] = None) -> Optional[Dict[str, Any]]:
+def get_inference_record(patient_id: str, exam_date: Optional[str] = None, model_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """
     Get inference record for a patient.
     If exam_date is provided, return that specific instance; otherwise return latest.
     Returns the raw data payload (not the metadata wrapper).
     """
-    _refresh_inference_cache()
+    resolved = _resolve_model_id(model_id)
+    _refresh_inference_cache(model_id=resolved)
     with _inference_cache_lock:
-        instances = _inference_patient_records.get(patient_id)
+        model_records = _inference_patient_records.get(resolved, {})
+        instances = model_records.get(patient_id)
         if not instances:
             return None
         
@@ -404,14 +795,16 @@ def get_inference_record(patient_id: str, exam_date: Optional[str] = None) -> Op
         return dict(instances[0]["data"])
 
 
-def get_inference_base_dir(patient_id: str, exam_date: Optional[str] = None) -> Optional[str]:
+def get_inference_base_dir(patient_id: str, exam_date: Optional[str] = None, model_id: Optional[str] = None) -> Optional[str]:
     """
     Get base directory for a patient's exam instance.
     If exam_date is provided, return that specific instance's base_dir; otherwise return latest.
     """
-    _refresh_inference_cache()
+    resolved = _resolve_model_id(model_id)
+    _refresh_inference_cache(model_id=resolved)
     with _inference_cache_lock:
-        instances = _inference_patient_records.get(patient_id)
+        model_records = _inference_patient_records.get(resolved, {})
+        instances = model_records.get(patient_id)
         if not instances:
             return None
         
@@ -426,14 +819,16 @@ def get_inference_base_dir(patient_id: str, exam_date: Optional[str] = None) -> 
         return instances[0]["base_dir"]
 
 
-def get_inference_instances(patient_id: str) -> List[Dict[str, str]]:
+def get_inference_instances(patient_id: str, model_id: Optional[str] = None) -> List[Dict[str, str]]:
     """
     Get list of all exam instances for a patient.
     Returns list of metadata dicts with keys: source_date, source_file
     """
-    _refresh_inference_cache()
+    resolved = _resolve_model_id(model_id)
+    _refresh_inference_cache(model_id=resolved)
     with _inference_cache_lock:
-        instances = _inference_patient_records.get(patient_id)
+        model_records = _inference_patient_records.get(resolved, {})
+        instances = model_records.get(patient_id)
         if not instances:
             return []
         
@@ -447,16 +842,18 @@ def get_inference_instances(patient_id: str) -> List[Dict[str, str]]:
         ]
 
 
-def get_full_inference_map() -> Dict[str, Dict[str, Any]]:
+def get_full_inference_map(model_id: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
     """
     Get all patient records (latest instance for each patient).
     Maintained for backwards compatibility.
     """
-    _refresh_inference_cache()
+    resolved = _resolve_model_id(model_id)
+    _refresh_inference_cache(model_id=resolved)
     with _inference_cache_lock:
+        model_records = _inference_patient_records.get(resolved, {})
         return {
             pid: dict(instances[0]["data"])
-            for pid, instances in _inference_patient_records.items()
+            for pid, instances in model_records.items()
             if instances
         }
 
@@ -531,9 +928,9 @@ def _parse_ts_from_imgpath(p: str) -> int:
     except Exception:
         return 0
 
-def _warm_raw_cache_from_raw_json(ris_exam_id: str, exam_date: Optional[str] = None) -> None:
-    """Build raw_probs_cache[ris_exam_id] from aggregated inference records."""
-    record = get_inference_record(ris_exam_id, exam_date)
+def _warm_raw_cache_from_raw_json(model_id: str, ris_exam_id: str, exam_date: Optional[str] = None) -> None:
+    """Build raw_probs_cache[...] from aggregated inference records."""
+    record = get_inference_record(ris_exam_id, exam_date, model_id=model_id)
     if record is None:
         raise KeyError(f"Patient {ris_exam_id} not found in inference cache")
 
@@ -553,10 +950,12 @@ def _warm_raw_cache_from_raw_json(ris_exam_id: str, exam_date: Optional[str] = N
 
         probs = _extract_disease_probs(img)
 
-        # cache by id - include exam_date in key if specified
-        cache_key = f"{ris_exam_id}_{exam_date}" if exam_date else ris_exam_id
-        img_id = f"img_{cache_key}_{img.get('img_path', '')}"
-        raw_by_id[img_id] = probs
+        # cache by id - include both legacy (no exam_date) and composite keys
+        base_img_id = f"img_{ris_exam_id}_{img.get('img_path', '')}"
+        raw_by_id[base_img_id] = probs
+        if exam_date:
+            composite_img_id = f"img_{ris_exam_id}_{exam_date}_{img.get('img_path', '')}"
+            raw_by_id[composite_img_id] = probs
 
         # push into type list; augment with 'probs' for fallback users
         img_copy = dict(img)
@@ -572,14 +971,14 @@ def _warm_raw_cache_from_raw_json(ris_exam_id: str, exam_date: Optional[str] = N
         )
 
     # Use composite key for cache if exam_date specified
-    cache_key = f"{ris_exam_id}_{exam_date}" if exam_date else ris_exam_id
+    cache_key = _make_raw_cache_key(model_id, ris_exam_id, exam_date)
     raw_probs_cache[cache_key] = {"by_type": raw_by_type, "by_id": raw_by_id}
 
 # No preloading - data will be loaded on-demand
 
 # --- API Endpoints ---
 @app.get("/api/patients/{ris_exam_id}")
-async def get_patient_by_id(ris_exam_id: str, exam_date: Optional[str] = None):
+async def get_patient_by_id(ris_exam_id: str, exam_date: Optional[str] = None, model_id: Optional[str] = None):
     """
     Returns the data for a specific patient by ris_exam_id (patient_id).
     Optional exam_date parameter to load a specific exam instance (format: YYYYMMDD).
@@ -588,17 +987,19 @@ async def get_patient_by_id(ris_exam_id: str, exam_date: Optional[str] = None):
     import time
     start_time = time.time()
     
-    # Create cache key that includes exam_date if specified
-    cache_key = f"{ris_exam_id}_{exam_date}" if exam_date else ris_exam_id
+    resolved_model_id = _resolve_model_id(model_id)
+    model_cfg = _get_model_config(resolved_model_id)
+    cache_key = _make_patient_cache_key(resolved_model_id, ris_exam_id, exam_date)
     
     with patient_data_lock:
         # Check cache first
         if cache_key in patients_data_cache:
             print(f"Serving cached data for patient: {cache_key} (took {time.time() - start_time:.2f}s)")
             # Warm raw prob cache if missing
-            if cache_key not in raw_probs_cache:
+            raw_cache_key = _make_raw_cache_key(resolved_model_id, ris_exam_id, exam_date)
+            if raw_cache_key not in raw_probs_cache:
                 try:
-                    _warm_raw_cache_from_raw_json(ris_exam_id, exam_date)
+                    _warm_raw_cache_from_raw_json(resolved_model_id, ris_exam_id, exam_date)
                 except Exception:
                     pass
             return patients_data_cache[cache_key]
@@ -606,16 +1007,16 @@ async def get_patient_by_id(ris_exam_id: str, exam_date: Optional[str] = None):
         # Load from data source
         try:
             print(f"Loading patient {cache_key} from data source...")
-            record = get_inference_record(ris_exam_id, exam_date)
+            record = get_inference_record(ris_exam_id, exam_date, model_id=resolved_model_id)
             if record is None:
                 raise KeyError
-            base_dir = get_inference_base_dir(ris_exam_id, exam_date) or RAW_JSON_ROOT
-            patient_data = load_patient_from_record(ris_exam_id, record, base_dir)
+            base_dir = get_inference_base_dir(ris_exam_id, exam_date, model_id=resolved_model_id) or model_cfg.get("abs_root") or RAW_JSON_ROOT
+            patient_data = load_patient_from_record(ris_exam_id, record, base_dir, model_cfg, exam_date=exam_date)
             # Cache the loaded data with composite key
             patients_data_cache[cache_key] = patient_data
             # Build raw prob cache for this patient (warm for reselection)
             try:
-                _warm_raw_cache_from_raw_json(ris_exam_id, exam_date)
+                _warm_raw_cache_from_raw_json(resolved_model_id, ris_exam_id, exam_date)
             except Exception:
                 pass
             elapsed = time.time() - start_time
@@ -629,10 +1030,10 @@ async def get_patient_by_id(ris_exam_id: str, exam_date: Optional[str] = None):
             raise HTTPException(status_code=500, detail="Failed to load patient data")
 
 @app.get("/api/patients")
-async def get_available_patient_ids():
+async def get_available_patient_ids(model_id: Optional[str] = None):
     """Returns a list of available patient IDs from the data source."""
     try:
-        ids = get_inference_patient_ids()
+        ids = get_inference_patient_ids(model_id=model_id)
         print(f"Found {len(ids)} available patients")
         return {"patient_ids": ids}
     except Exception as e:
@@ -640,13 +1041,13 @@ async def get_available_patient_ids():
         raise HTTPException(status_code=500, detail="Failed to load patient IDs")
 
 @app.get("/api/patients/{ris_exam_id}/instances")
-async def get_patient_exam_instances(ris_exam_id: str):
+async def get_patient_exam_instances(ris_exam_id: str, model_id: Optional[str] = None):
     """
     Returns all available exam instances for a specific patient.
     Returns list of exam dates sorted by newest first.
     """
     try:
-        instances = get_inference_instances(ris_exam_id)
+        instances = get_inference_instances(ris_exam_id, model_id=model_id)
         if not instances:
             raise HTTPException(status_code=404, detail=f"Patient {ris_exam_id} not found")
         return {"patient_id": ris_exam_id, "instances": instances}
@@ -656,15 +1057,38 @@ async def get_patient_exam_instances(ris_exam_id: str):
         print(f"Error loading exam instances for {ris_exam_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to load exam instances")
 
+
+@app.get("/api/models")
+async def list_inference_models():
+    """Expose available inference models and metadata to the frontend."""
+    models_payload = []
+    for mid in ORDERED_MODEL_IDS:
+        cfg = MODEL_CONFIGS[mid]
+        models_payload.append({
+            "id": mid,
+            "name": cfg["name"],
+            "priority": cfg["priority"],
+            "root": cfg["root"],
+            "diseases": cfg["diseases"],
+            "threshold_sets": cfg["threshold_sets"],
+            "default_threshold_set_id": cfg["default_threshold_set_id"],
+        })
+    return {
+        "default_model_id": DEFAULT_MODEL_ID,
+        "models": models_payload,
+    }
+
 @app.post("/api/reload_data")
-async def reload_data_manually():
+async def reload_data_manually(model_id: Optional[str] = None):
     """Manually trigger a reload of inference data from disk."""
     try:
         logger.info("Manual data reload requested")
-        _refresh_inference_cache(force=True)
+        resolved = _resolve_model_id(model_id)
+        _refresh_inference_cache(force=True, model_id=resolved)
         with _inference_cache_lock:
-            total_patients = len(_inference_patient_records)
-            total_instances = sum(len(instances) for instances in _inference_patient_records.values())
+            model_records = _inference_patient_records.get(resolved, {})
+            total_patients = len(model_records)
+            total_instances = sum(len(instances) for instances in model_records.values())
         return {
             "status": "success",
             "message": "Data reloaded successfully",
@@ -676,24 +1100,46 @@ async def reload_data_manually():
         raise HTTPException(status_code=500, detail=f"Failed to reload data: {str(e)}")
 
 @app.get("/api/monitor_status")
-async def get_monitor_status():
+async def get_monitor_status(model_id: Optional[str] = None):
     """Get status of the background data monitor."""
     global _monitor_thread
     is_running = _monitor_thread is not None and _monitor_thread.is_alive()
-    
+
+    resolved_ids = (
+        [_resolve_model_id(model_id)]
+        if model_id
+        else ORDERED_MODEL_IDS
+    )
+
     with _inference_cache_lock:
-        loaded_files_count = len(_inference_loaded_files)
-        patients_count = len(_inference_patient_records)
-        total_instances = sum(len(instances) for instances in _inference_patient_records.values())
-    
+        models_status = []
+        total_patients = 0
+        total_instances = 0
+        total_files = 0
+        for mid in resolved_ids:
+            records = _inference_patient_records.get(mid, {})
+            file_list = _inference_loaded_files.get(mid, [])
+            instance_count = sum(len(instances) for instances in records.values())
+            models_status.append({
+                "model_id": mid,
+                "model_name": MODEL_CONFIGS[mid]["name"],
+                "patients_count": len(records),
+                "total_instances": instance_count,
+                "loaded_files": len(file_list),
+                "loaded_file_paths": file_list,
+            })
+            total_patients += len(records)
+            total_instances += instance_count
+            total_files += len(file_list)
+
     return {
         "monitor_enabled": AUTO_RELOAD_ENABLED,
         "monitor_running": is_running,
         "reload_interval_seconds": AUTO_RELOAD_INTERVAL_SECONDS,
-        "loaded_files": loaded_files_count,
-        "patients_count": patients_count,
+        "patients_count": total_patients,
         "total_instances": total_instances,
-        "loaded_file_paths": _inference_loaded_files
+        "loaded_files": total_files,
+        "models": models_status,
     }
 
 @app.post("/api/submit_diagnosis")
@@ -704,7 +1150,8 @@ async def submit_diagnosis(request: SubmitDiagnosisRequest):
     """
     # Determine exam_date - use provided or get from patient cache
     exam_date = request.exam_date
-    cache_key = f"{request.patient_id}_{exam_date}" if exam_date else request.patient_id
+    resolved_model_id = _resolve_model_id(request.model_id)
+    cache_key = _make_patient_cache_key(resolved_model_id, request.patient_id, exam_date)
     
     with patient_data_lock:
         print(f"Received diagnosis submission for patient: {request.patient_id}, exam_date: {exam_date}")
@@ -713,7 +1160,8 @@ async def submit_diagnosis(request: SubmitDiagnosisRequest):
         patient = patients_data_cache.get(cache_key)
         if not patient:
             # Try without exam_date
-            patient = patients_data_cache.get(request.patient_id)
+            fallback_key = _make_patient_cache_key(resolved_model_id, request.patient_id, None)
+            patient = patients_data_cache.get(fallback_key)
             if not patient:
                 raise HTTPException(status_code=404, detail=f"Patient {request.patient_id} not found in cache. Load patient data first.")
             # If found without exam_date, try to get exam_date from patient
@@ -730,7 +1178,7 @@ async def submit_diagnosis(request: SubmitDiagnosisRequest):
             
             # If still no exam_date, check inference records to get latest
             if not exam_date:
-                instances = get_inference_instances(request.patient_id)
+                instances = get_inference_instances(request.patient_id, model_id=resolved_model_id)
                 if instances:
                     exam_date = instances[0].get('exam_date')  # Get latest
                     logger.info(f"Using latest exam_date {exam_date} from instances")
@@ -805,141 +1253,139 @@ async def submit_diagnosis(request: SubmitDiagnosisRequest):
 async def update_selection(request: UpdateSelectionRequest):
     """
     Recompute prediction_results and diagnosis_results based on the selected image IDs.
-    Rules:
-    - For each eye, prefer CFP probs when a matching CFP image is selected; cataract prefers 外眼 if an external-eye image is selected for that eye.
-    - If selected images don't include a type, fallback to any available for that type; else use zeros for missing.
-    - Update thresholds for cataract when 外眼 is used.
+    
+    NEW LOGIC: Images are selected by SLOT POSITION, not by their labeled type.
+    Slot positions (0-indexed in the array):
+    - Slot 0: 右眼CFP position
+    - Slot 1: 左眼CFP position  
+    - Slot 2: 右眼外眼照 position
+    - Slot 3: 左眼外眼照 position
+    
+    The actual image type label may be incorrect, so we use the image's actual predictions
+    based on slot position to determine which eye's results to update.
     """
-    # Create cache key that includes exam_date if specified
-    cache_key = f"{request.patient_id}_{request.exam_date}" if request.exam_date else request.patient_id
+    resolved_model_id = _resolve_model_id(request.model_id)
+    cache_key = _make_patient_cache_key(resolved_model_id, request.patient_id, request.exam_date)
     
     with patient_data_lock:
         patient = patients_data_cache.get(cache_key)
         if not patient:
-            raise HTTPException(status_code=404, detail=f"Patient {cache_key} not found in cache. Load patient data first.")
-
-        # Build maps for quick lookup
-        selected_set = set(request.selected_image_ids or [])
-        all_images = list(patient.eye_images)
-
-        # Helper to find first image by type among selected, else among all
-        def find_image_by_type(img_type: str):
-            for im in all_images:
-                if im.type == img_type and im.id in selected_set:
-                    return im
-            for im in all_images:
-                if im.type == img_type:
-                    return im
-            return None
+            # Fallback for older clients that might not send exam_date
+            fallback_key = _make_patient_cache_key(resolved_model_id, request.patient_id, None)
+            patient = patients_data_cache.get(fallback_key)
+            if not patient:
+                raise HTTPException(status_code=404, detail=f"Patient {cache_key} not found in cache. Load patient data first.")
 
         # We need access to original JSON probs to recompute.
-        # Prefer in-memory cache to avoid disk IO; ensure it's present.
-        raw_cache_key = cache_key
+        raw_cache_key = _make_raw_cache_key(resolved_model_id, request.patient_id, request.exam_date)
         if raw_cache_key not in raw_probs_cache:
-            # Try to warm the cache quickly from disk (RAW v2)
             try:
-                _warm_raw_cache_from_raw_json(request.patient_id, request.exam_date)
+                _warm_raw_cache_from_raw_json(resolved_model_id, request.patient_id, request.exam_date)
             except Exception:
                 raise HTTPException(status_code=501, detail="Recompute not supported without source data")
 
-        raw_by_type = raw_probs_cache[raw_cache_key]["by_type"]
         raw_by_id = raw_probs_cache[raw_cache_key]["by_id"]
 
-        # Fallback: get the latest image's probs for a given type
-        def extract_probs_by_type(desired_type: str):
-            lst = raw_by_type.get(desired_type, [])
-            return (lst[0].get("probs", {}) if lst else {})
+        # Get selected images by slot position
+        selected_ids = request.selected_image_ids or []
+        
+        # Map slot positions to expected types (for reference/fallback only)
+        # Slot 0: 右眼CFP, Slot 1: 左眼CFP, Slot 2: 右眼外眼照, Slot 3: 左眼外眼照
+        slot_config = [
+            {"index": 0, "eye": "right", "type": "cfp", "label": "右眼CFP"},
+            {"index": 1, "eye": "left", "type": "cfp", "label": "左眼CFP"},
+            {"index": 2, "eye": "right", "type": "external", "label": "右眼外眼照"},
+            {"index": 3, "eye": "left", "type": "external", "label": "左眼外眼照"}
+        ]
 
-        diagnosis_mapping = {
-            "青光眼": "青光眼",
-            "糖尿病性视网膜病变": "糖网",
-            "年龄相关性黄斑变性": "AMD",
-            "病理性近视": "病理性近视",
-            "视网膜静脉阻塞（RVO）": "RVO",
-            "视网膜动脉阻塞（RAO）": "RAO",
-            "视网膜脱离（RD）": "视网膜脱离",
-            "其他视网膜病": "其它视网膜病",
-            "其他黄斑病变": "其它黄斑病变",
-            "白内障": "白内障",
-            "正常": "正常"
+        model_cfg = _get_model_config(resolved_model_id)
+        alias_map = model_cfg.get("disease_alias_map", {})
+        disease_keys = [entry["key"] for entry in model_cfg.get("diseases", [])]
+        if not disease_keys:
+            disease_keys = list((patient.prediction_results or {}).get("left_eye", {}).keys())
+
+        # Initialize structures for each eye
+        eye_data = {
+            "left": {"cfp_probs": None, "ext_probs": None, "cfp_image_id": None, "ext_image_id": None},
+            "right": {"cfp_probs": None, "ext_probs": None, "cfp_image_id": None, "ext_image_id": None}
         }
 
-        from datatype import CATARACT_EXTERNAL_THRESHOLD
+        # Process each slot position
+        for slot in slot_config:
+            if slot["index"] < len(selected_ids):
+                image_id = selected_ids[slot["index"]]
+                if image_id and image_id in raw_by_id:
+                    raw_probs = raw_by_id[image_id]
+                    mapped_probs: Dict[str, float] = {}
+                    for k, v in (raw_probs or {}).items():
+                        canonical = alias_map.get(k) or alias_map.get(str(k).lower()) or k
+                        mapped_probs[canonical] = float(v)
+                    
+                    # Store probabilities based on slot position
+                    eye = slot["eye"]
+                    if slot["type"] == "cfp":
+                        eye_data[eye]["cfp_probs"] = mapped_probs
+                        eye_data[eye]["cfp_image_id"] = image_id
+                    else:  # external
+                        eye_data[eye]["ext_probs"] = mapped_probs
+                        eye_data[eye]["ext_image_id"] = image_id
 
-        prediction_thresholds = EyePredictionThresholds(**patient.prediction_thresholds.dict())
-        prediction_results = {}
+        # Build prediction results for each eye
+        prediction_thresholds = dict(patient.prediction_thresholds or {})
+        prediction_results: Dict[str, Dict[str, float]] = {}
         diagnosis_results = {}
-
         ext_cataract_used_overall = False
         debug_used = {"left_eye": {}, "right_eye": {}}
-        for eye in ["left_eye", "right_eye"]:
-            cfp_type = "左眼CFP" if eye == "left_eye" else "右眼CFP"
-            ext_type = "左眼外眼照" if eye == "left_eye" else "右眼外眼照"
 
-            # Determine selected image presence per type
-            selected_cfp = find_image_by_type(cfp_type)
-            selected_ext = find_image_by_type(ext_type)
-
-            # Extract probs: prefer exact selected image's probs via image ID; fallback to latest-by-type
-            if selected_cfp and selected_cfp.id in raw_by_id:
-                raw_cfp = raw_by_id[selected_cfp.id]
-                debug_used[eye]["cfp"] = selected_cfp.id
+        for eye_name in ["left", "right"]:
+            eye_key = f"{eye_name}_eye"
+            data = eye_data[eye_name]
+            
+            # Start with zero probabilities
+            probs = {k: 0.0 for k in disease_keys}
+            
+            # Use CFP probabilities if available (covers most diseases)
+            if data["cfp_probs"]:
+                probs.update(data["cfp_probs"])
+                debug_used[eye_key]["cfp"] = data["cfp_image_id"]
             else:
-                raw_cfp = extract_probs_by_type(cfp_type)
-                debug_used[eye]["cfp"] = f"latest_by_type:{cfp_type}"
-            if selected_ext and selected_ext.id in raw_by_id:
-                raw_ext = raw_by_id[selected_ext.id]
-                debug_used[eye]["ext"] = selected_ext.id
-            else:
-                raw_ext = extract_probs_by_type(ext_type)
-                debug_used[eye]["ext"] = f"latest_by_type:{ext_type}"
-
-            # Normalize mapped probs
-            def map_probs(raw):
-                return {diagnosis_mapping.get(k, k): v for k, v in (raw or {}).items()}
-
-            cfp_probs = map_probs(raw_cfp)
-            ext_probs = map_probs(raw_ext)
-
-            # Start from zeros if missing
-            def zero_probs():
-                return {k: 0.0 for k in diagnosis_mapping.values()}
-
-            probs = zero_probs()
-
-            # Use CFP probs when available (prefer selected CFP if exists; but probabilities are same per type here)
-            if cfp_probs:
-                probs.update(cfp_probs)
-
-            # If an external-eye image is selected for this eye and it has cataract probability, override cataract
+                debug_used[eye_key]["cfp"] = "none"
+            
+            # Override cataract with external eye image if available
             ext_used = False
-            if selected_ext and ("白内障" in ext_probs):
-                probs["白内障"] = ext_probs["白内障"]
+            if data["ext_probs"] and "白内障" in data["ext_probs"]:
+                probs["白内障"] = data["ext_probs"]["白内障"]
                 ext_used = True
-
+                debug_used[eye_key]["ext"] = data["ext_image_id"]
+            else:
+                debug_used[eye_key]["ext"] = "none" if not data["ext_image_id"] else f"{data['ext_image_id']}_no_cataract"
+            
             # Save predictions
-            prediction_results[eye] = EyePrediction(**probs)
-
+            prediction_results[eye_key] = {k: float(probs.get(k, 0.0)) for k in disease_keys}
+            
             # Thresholds and diagnoses
-            eye_thresholds = prediction_thresholds.dict()
+            eye_thresholds = dict(prediction_thresholds)
             if ext_used:
                 eye_thresholds["白内障"] = CATARACT_EXTERNAL_THRESHOLD
                 ext_cataract_used_overall = True
+            
             # Build diagnosis using possibly adjusted threshold
             diag = {}
             for disease, threshold in eye_thresholds.items():
-                diag[disease] = getattr(prediction_results[eye], disease, 0.0) >= threshold
-            diagnosis_results[eye] = EyeDiagnosis(**diag)
+                prob_val = float(prediction_results[eye_key].get(disease, 0.0))
+                diag[disease] = prob_val >= float(threshold)
+            diagnosis_results[eye_key] = diag
 
-        # If any eye used ext cataract, reflect that in thresholds object returned (for UI remap); keep cache thresholds unchanged otherwise
+        # If any eye used ext cataract, reflect that in thresholds object returned
         if ext_cataract_used_overall:
-            setattr(prediction_thresholds, "白内障", CATARACT_EXTERNAL_THRESHOLD)
+            prediction_thresholds["白内障"] = CATARACT_EXTERNAL_THRESHOLD
 
         # Update cache object
         patient.prediction_results = prediction_results
         patient.diagnosis_results = diagnosis_results
-        # Note: prediction_thresholds may be eye-dependent for cataract; keeping patient-wide as prior
+        patient.prediction_thresholds = prediction_thresholds
 
+        # Convert Pydantic models to dictionaries for JSON response
         return {
             "status": "Selection updated",
             "prediction_results": prediction_results,
@@ -1001,62 +1447,74 @@ async def add_new_patient_data(patient_data: PatientData):
     and caches it for future access.
     """
     with patient_data_lock:
-        if patient_data.patient_id in patients_data_cache:
-            print(f"Patient {patient_data.patient_id} already exists in cache. Overwriting.")
+        resolved_model_id = _resolve_model_id(patient_data.model_id)
+        cache_key = _make_patient_cache_key(resolved_model_id, patient_data.patient_id, None)
+        if cache_key in patients_data_cache:
+            print(f"Patient {patient_data.patient_id} (model {resolved_model_id}) already exists in cache. Overwriting.")
         
-        patients_data_cache[patient_data.patient_id] = patient_data
-        print(f"New patient {patient_data.patient_id} added to cache.")
-        return {"status": f"Patient {patient_data.patient_id} added successfully to cache."}
+        patients_data_cache[cache_key] = patient_data
+        print(f"New patient {patient_data.patient_id} cached for model {resolved_model_id}.")
+        return {"status": f"Patient {patient_data.patient_id} cached successfully for model {resolved_model_id}."}
 
 
 @app.post("/api/alter_threshold")
 async def alter_threshold(request: AlterThresholdRequest):
     """
-    Cycles between different threshold sets for a patient and recomputes diagnosis results.
+    Switch between threshold sets defined by the active model and recompute diagnoses.
     """
-    # Create cache key that includes exam_date if specified
-    cache_key = f"{request.patient_id}_{request.exam_date}" if request.exam_date else request.patient_id
-    
+    resolved_model_id = _resolve_model_id(request.model_id)
+    model_cfg = _get_model_config(resolved_model_id)
+    cache_key = _make_patient_cache_key(resolved_model_id, request.patient_id, request.exam_date)
+    threshold_sets = model_cfg["threshold_sets"]
+    threshold_indices = model_cfg["threshold_set_indices"]
+
     with patient_data_lock:
         patient = patients_data_cache.get(cache_key)
         if not patient:
-            raise HTTPException(status_code=404, detail=f"Patient {cache_key} not found in cache.")
-        
-        # Cycle to the next threshold set (0 -> 1, 1 -> 0)
-        current_set = getattr(patient, 'active_threshold_set', 0)
-        next_set = 1 if current_set == 0 else 0
-        
-        # Get the new threshold values
-        new_thresholds = EyePredictionThresholds.get_threshold_set(next_set)
-        
-        # Update patient's threshold set and active set index
-        patient.prediction_thresholds = new_thresholds
-        patient.active_threshold_set = next_set
-        
-        # Recompute diagnosis results with new thresholds
-        diagnosis_results = {}
-        for eye in ["left_eye", "right_eye"]:
-            if eye not in patient.prediction_results:
-                continue
-                
-            diag = {}
-            prediction = patient.prediction_results[eye]
-            
-            for disease in ["青光眼", "糖网", "AMD", "病理性近视", "RVO", "RAO", "视网膜脱离", "其它视网膜病", "其它黄斑病变", "白内障", "正常"]:
-                threshold = getattr(new_thresholds, disease, 0.5)
-                prob = getattr(prediction, disease, 0.0)
-                diag[disease] = prob >= threshold
-            
-            diagnosis_results[eye] = EyeDiagnosis(**diag)
-        
-        # Update patient's diagnosis results
-        patient.diagnosis_results = diagnosis_results
-        
+            # Fallback to latest if specific exam not cached
+            fallback_key = _make_patient_cache_key(resolved_model_id, request.patient_id, None)
+            patient = patients_data_cache.get(fallback_key)
+        if not patient:
+            raise HTTPException(status_code=404, detail=f"Patient {request.patient_id} not loaded for model {resolved_model_id}.")
+
+        current_set_id = getattr(patient, "active_threshold_set_id", None)
+        current_idx = threshold_indices.get(current_set_id, getattr(patient, "active_threshold_set_index", 0))
+
+        if request.threshold_set_id and request.threshold_set_id in threshold_indices:
+            target_set_id = request.threshold_set_id
+            target_idx = threshold_indices[target_set_id]
+        else:
+            target_idx = (current_idx + 1) % len(threshold_sets)
+            target_set_id = threshold_sets[target_idx]["id"]
+
+        new_thresholds = threshold_sets[target_idx]["values"]
+
+        patient.prediction_thresholds = dict(new_thresholds)
+        patient.active_threshold_set_id = target_set_id
+        patient.active_threshold_set_index = target_idx
+        patient.active_threshold_set = target_idx  # backwards compatibility
+        patient.threshold_sets = threshold_sets
+        patient.model_id = resolved_model_id
+        patient.model_name = model_cfg["name"]
+        patient.diseases = model_cfg["diseases"]
+
+        updated_diagnosis_results: Dict[str, Dict[str, bool]] = {}
+        for eye_key, probs in (patient.prediction_results or {}).items():
+            diag_flags: Dict[str, bool] = {}
+            for disease_key, threshold_value in new_thresholds.items():
+                prob_val = float((probs or {}).get(disease_key, 0.0))
+                diag_flags[disease_key] = prob_val >= float(threshold_value)
+            updated_diagnosis_results[eye_key] = diag_flags
+
+        patient.diagnosis_results = updated_diagnosis_results
+
         return {
             "status": "Threshold altered successfully",
-            "active_threshold_set": next_set,
-            "new_thresholds": new_thresholds.dict(),
-            "updated_diagnosis_results": diagnosis_results
+            "active_threshold_set": target_idx,
+            "active_threshold_set_id": target_set_id,
+            "threshold_sets": threshold_sets,
+            "new_thresholds": new_thresholds,
+            "updated_diagnosis_results": updated_diagnosis_results,
         }
 
 
@@ -1220,13 +1678,18 @@ def find_best_matching_consultation(all_data: List[Dict[str, Any]], patient_name
     return None
 
 # --- Helpers for patient context ---
-def _get_patient_context(ris_exam_id: str) -> Dict[str, Optional[str]]:
+def _get_patient_context(ris_exam_id: str, model_id: Optional[str] = None, exam_date: Optional[str] = None) -> Dict[str, Optional[str]]:
     """
     Returns {'name': str|None, 'examineTime': str|None} from cache, else from aggregated inference data.
     """
     ctx = {"name": None, "examineTime": None}
+    resolved_model_id = _resolve_model_id(model_id)
     try:
-        patient = patients_data_cache.get(ris_exam_id)
+        cache_key = _make_patient_cache_key(resolved_model_id, ris_exam_id, exam_date)
+        patient = patients_data_cache.get(cache_key)
+        if not patient and exam_date:
+            fallback_key = _make_patient_cache_key(resolved_model_id, ris_exam_id, None)
+            patient = patients_data_cache.get(fallback_key)
         if patient:
             ctx["name"] = getattr(patient, "name", None)
             ctx["examineTime"] = getattr(patient, "examine_time", None)
@@ -1237,7 +1700,7 @@ def _get_patient_context(ris_exam_id: str) -> Dict[str, Optional[str]]:
 
     # Fallback to aggregated inference cache
     try:
-        record = get_inference_record(ris_exam_id)
+        record = get_inference_record(ris_exam_id, exam_date, model_id=resolved_model_id)
         if isinstance(record, dict):
             ctx["name"] = record.get("name")
             ctx["examineTime"] = record.get("examineTime")
@@ -1897,7 +2360,12 @@ def _fallback_ai_summary(patient: Optional[PatientData], eye_key: str) -> str:
         logger.error(f"Fallback AI summary failed: {e}")
         return f"获取预测数据失败: {str(e)}"
 
-def _build_context_placeholders(ris_exam_id: Optional[str], patient_name: Optional[str] = None, exam_date: Optional[str] = None) -> Dict[str, str]:
+def _build_context_placeholders(
+    ris_exam_id: Optional[str],
+    patient_name: Optional[str] = None,
+    exam_date: Optional[str] = None,
+    model_id: Optional[str] = None,
+) -> Dict[str, str]:
     """
     Build context placeholders for LLM prompts.
     
@@ -1906,7 +2374,9 @@ def _build_context_placeholders(ris_exam_id: Optional[str], patient_name: Option
         patient_name: Optional patient name to prioritize for consultation matching (from URL param)
         exam_date: Optional exam date to retrieve specific manual diagnosis
     """
-    p: Optional[PatientData] = patients_data_cache.get(ris_exam_id or "")
+    resolved_model_id, p = (None, None)
+    if ris_exam_id:
+        resolved_model_id, p = _get_cached_patient(ris_exam_id, model_id=model_id, exam_date=exam_date)
     
     # 从患者数据中获取基本信息
     name = getattr(p, "name", None) if p else None
@@ -1914,10 +2384,12 @@ def _build_context_placeholders(ris_exam_id: Optional[str], patient_name: Option
     gender = getattr(p, "gender", None) if p and hasattr(p, "gender") else None
     examine_time = getattr(p, "examine_time", None) if p else None
     
+    lookup_model = _resolve_model_id(model_id) if model_id else (resolved_model_id or DEFAULT_MODEL_ID)
+
     # 如果患者数据中没有年龄和性别，尝试从推理结果缓存中获取
     if not age or not gender or not name or not examine_time:
         try:
-            record = get_inference_record(ris_exam_id or "")
+            record = get_inference_record(ris_exam_id or "", exam_date, model_id=lookup_model)
             if isinstance(record, dict):
                 if not age and record.get("age") is not None:
                     age = record.get("age")
@@ -1930,7 +2402,7 @@ def _build_context_placeholders(ris_exam_id: Optional[str], patient_name: Option
         except Exception as e:
             logger.warning(f"Failed to load additional patient info: {str(e)}")
 
-    ctx = _get_patient_context(ris_exam_id or "")
+    ctx = _get_patient_context(ris_exam_id or "", model_id=lookup_model, exam_date=exam_date)
 
     # 从问诊数据中获取年龄和性别信息（优先级更高，因为这是用户填写的最新信息）
     cons: Optional[Dict[str, Any]] = None
@@ -2030,15 +2502,34 @@ def _fill_template(template: str, mapping: Dict[str, str]) -> str:
 class LLMChatRequest(BaseModel):
     patient_id: Optional[str] = None
     patient_name: Optional[str] = None  # Add patient_name parameter for consultation matching
+    model_id: Optional[str] = None
     messages: List[Dict[str, str]]  # [{role:'user'|'assistant'|'system', content:str}]
 
 
 def _llm_env():
-    # OLLAMA本地部署配置
+    provider = (os.getenv("LLM_PROVIDER") or "ollama").strip().lower()
+    base = os.getenv("LLM_API_BASE")
+    if not base:
+        # Keep previous local default while allowing remote API override
+        base = "http://10.138.6.3:50201" if provider == "ollama" else "https://api.openai.com/v1"
+
+    endpoint = os.getenv("LLM_CHAT_ENDPOINT")
+    if not endpoint:
+        endpoint = "/api/chat" if provider == "ollama" else "/v1/chat/completions"
+
+    model_default = "DeepSeek-3.1:latest" if provider == "ollama" else "gpt-4o-mini"
+    try:
+        temperature = float(os.getenv("LLM_TEMPERATURE", "0.2"))
+    except ValueError:
+        temperature = 0.2
+
     return {
-        "base": os.getenv("LLM_API_BASE", "http://10.138.6.3:50201"),
-        "model": os.getenv("LLM_MODEL", "DeepSeek-3.1:latest"),
-        "provider": os.getenv("LLM_PROVIDER", "ollama"),
+        "base": base.rstrip("/"),
+        "model": os.getenv("LLM_MODEL", model_default),
+        "provider": provider,
+        "api_key": os.getenv("LLM_API_KEY"),
+        "chat_endpoint": endpoint,
+        "temperature": temperature,
     }
 
 @app.post("/api/llm_chat_stream")
@@ -2062,7 +2553,7 @@ async def llm_chat_stream(req: LLMChatRequest):
 
     context_text = ""
     if cfg.get("include_patient_context", True):
-        placeholders = _build_context_placeholders(req.patient_id, req.patient_name)
+        placeholders = _build_context_placeholders(req.patient_id, req.patient_name, model_id=req.model_id)
         context_text = _fill_template(cfg.get("context_template", ""), placeholders)
 
         if is_initial_update:
@@ -2118,7 +2609,7 @@ async def llm_chat_stream(req: LLMChatRequest):
 
     # 验证消息列表不为空
     if not messages_to_send:
-        logger.error("No valid messages to send to OLLAMA")
+        logger.error("No valid messages to send to LLM provider")
         async def empty_response():
             yield "\n[错误] 没有有效的消息可发送\n"
         return StreamingResponse(empty_response(), media_type="text/plain; charset=utf-8")
@@ -2143,40 +2634,51 @@ async def llm_chat_stream(req: LLMChatRequest):
     
     logger.info("=" * 80)
 
+    def _build_chat_url() -> str:
+        endpoint = (env.get("chat_endpoint") or "").strip()
+        base = (env.get("base") or "").rstrip("/")
+        if endpoint.startswith("http://") or endpoint.startswith("https://"):
+            return endpoint
+        if base and endpoint:
+            endpoint_clean = endpoint.lstrip("/")
+            if base.endswith(endpoint_clean):
+                return base
+            return f"{base}/{endpoint_clean}"
+        return base or endpoint
+
+    # Use curl-like approach with simpler, more stable HTTP client configuration
+    # Increase timeouts and use connection pooling similar to curl's behavior
+    http_timeout = httpx.Timeout(
+        connect=30.0,  # Connection timeout
+        read=300.0,    # Read timeout (5 minutes for long responses)
+        write=30.0,    # Write timeout
+        pool=10.0      # Pool timeout
+    )
+
+    # Configure limits similar to curl's default behavior
+    http_limits = httpx.Limits(
+        max_keepalive_connections=5,
+        max_connections=10,
+        keepalive_expiry=30.0
+    )
+
     # 缓存助手回复内容
     assistant_buf: List[str] = []
 
     async def ollama_stream():
-        # OLLAMA API端点
-        url = f"{env['base'].rstrip('/')}/api/chat"
+        url = _build_chat_url()
         payload = {
             "model": env["model"],
             "messages": messages_to_send,
             "stream": True,
             "keep_alive": OLLAMA_KEEP_ALIVE
         }
-        
+
         logger.info(f"Sending request to OLLAMA: {url}")
         logger.info(f"Payload model: {payload['model']}")
         logger.info(f"Payload stream: {payload['stream']}")
         logger.info(f"Request type: {'COMBINED_USER_PROMPT' if is_initial_update else 'USER_CONTEXT_PROMPT'}")
-        
-        # Use curl-like approach with simpler, more stable HTTP client configuration
-        # Increase timeouts and use connection pooling similar to curl's behavior
-        timeout = httpx.Timeout(
-            connect=30.0,  # Connection timeout
-            read=300.0,    # Read timeout (5 minutes for long responses)
-            write=30.0,    # Write timeout
-            pool=10.0      # Pool timeout
-        )
-        
-        # Configure limits similar to curl's default behavior
-        limits = httpx.Limits(
-            max_keepalive_connections=5,
-            max_connections=10,
-            keepalive_expiry=30.0
-        )
-        
+
         last_exception: Optional[Exception] = None
 
         for attempt in range(1, OLLAMA_MAX_RETRIES + 1):
@@ -2193,8 +2695,8 @@ async def llm_chat_stream(req: LLMChatRequest):
             try:
                 # Create client with curl-like configuration
                 async with httpx.AsyncClient(
-                    timeout=timeout,
-                    limits=limits,
+                    timeout=http_timeout,
+                    limits=http_limits,
                     http2=False,  # Disable HTTP/2 for better stability
                     follow_redirects=True
                 ) as client:
@@ -2219,19 +2721,19 @@ async def llm_chat_stream(req: LLMChatRequest):
                         async for chunk in r.aiter_bytes(chunk_size=1024):
                             if not chunk:
                                 continue
-                            
+
                             buffer += chunk
-                            
+
                             # Process complete lines
                             while b'\n' in buffer:
                                 line_bytes, buffer = buffer.split(b'\n', 1)
-                                
+
                                 try:
                                     line = line_bytes.decode('utf-8', errors='replace').strip()
                                 except Exception as e:
                                     logger.warning(f"Failed to decode line: {e}")
                                     continue
-                                
+
                                 if not line:
                                     continue
 
@@ -2369,7 +2871,198 @@ async def llm_chat_stream(req: LLMChatRequest):
                 yield "\n[LLM warning] 模型未返回内容，请稍后重试或检查日志。\n"
             return
 
-    return StreamingResponse(ollama_stream(), media_type="text/plain; charset=utf-8")
+    async def api_stream():
+        url = _build_chat_url()
+        payload = {
+            "model": env["model"],
+            "messages": messages_to_send,
+            "stream": True,
+            "temperature": env.get("temperature", 0.2),
+        }
+
+        headers = {"Content-Type": "application/json"}
+        api_key = (env.get("api_key") or "").strip()
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
+        provider_name = env.get("provider", "api")
+        last_exception: Optional[Exception] = None
+
+        for attempt in range(1, OLLAMA_MAX_RETRIES + 1):
+            logger.info(
+                "Starting %s streaming attempt %s/%s for patient %s",
+                provider_name.upper(),
+                attempt,
+                OLLAMA_MAX_RETRIES,
+                req.patient_id
+            )
+
+            response_chunks = 0
+
+            try:
+                async with httpx.AsyncClient(
+                    timeout=http_timeout,
+                    limits=http_limits,
+                    http2=True,
+                    follow_redirects=True
+                ) as client:
+                    async with client.stream(
+                        "POST",
+                        url,
+                        json=payload,
+                        headers=headers
+                    ) as r:
+                        logger.info("%s Response Status: %s", provider_name.upper(), r.status_code)
+
+                        if r.status_code != 200:
+                            error_text = await r.aread()
+                            error_msg = error_text.decode('utf-8', errors='replace')
+                            last_exception = RuntimeError(f"HTTP {r.status_code}: {error_msg}")
+                            logger.error("%s Error Response (attempt %s): %s", provider_name.upper(), attempt, error_msg)
+                            continue
+
+                        async for raw_line in r.aiter_lines():
+                            if not raw_line:
+                                continue
+
+                            line = raw_line.strip()
+                            if not line:
+                                continue
+
+                            if line.startswith(":") or line.startswith("event:"):
+                                continue
+
+                            if line.startswith("data:"):
+                                line = line[5:].strip()
+
+                            if not line:
+                                continue
+
+                            if line in ("[DONE]", '"[DONE]"'):
+                                logger.info("%s stream signaled completion token [DONE].", provider_name.upper())
+                                break
+
+                            try:
+                                obj = json.loads(line)
+                            except json.JSONDecodeError:
+                                logger.debug("Skipping non-JSON line from %s: %s", provider_name, line[:200])
+                                continue
+
+                            if isinstance(obj, dict) and obj.get("error"):
+                                err_payload = obj.get("error")
+                                err_msg = err_payload.get("message") if isinstance(err_payload, dict) else str(err_payload)
+                                last_exception = RuntimeError(err_msg)
+                                logger.error("%s Stream Error (attempt %s): %s", provider_name.upper(), attempt, err_msg)
+                                break
+
+                            choices = obj.get("choices") or []
+                            chunk_text = ""
+
+                            for choice in choices:
+                                delta = choice.get("delta") or {}
+                                if isinstance(delta, dict):
+                                    chunk = delta.get("content")
+                                    if chunk:
+                                        chunk_text += chunk
+                                message = choice.get("message") or {}
+                                if not chunk_text and isinstance(message, dict):
+                                    chunk = message.get("content")
+                                    if chunk:
+                                        chunk_text += chunk
+
+                            if chunk_text:
+                                response_chunks += 1
+                                if response_chunks == 1:
+                                    logger.info("Started receiving %s streaming response...", provider_name.upper())
+                                assistant_buf.append(chunk_text)
+                                yield chunk_text
+
+                        if assistant_buf:
+                            logger.info(
+                                "%s response completed. Total chunks: %s, response length: %s chars",
+                                provider_name.upper(),
+                                response_chunks,
+                                len(''.join(assistant_buf))
+                            )
+                            return
+
+            except httpx.TimeoutException as e:
+                last_exception = e
+                logger.warning(
+                    "%s request timeout on attempt %s/%s: %s",
+                    provider_name.upper(),
+                    attempt,
+                    OLLAMA_MAX_RETRIES,
+                    str(e)
+                )
+            except httpx.ConnectError as e:
+                last_exception = e
+                logger.warning(
+                    "%s connection error on attempt %s/%s: %s",
+                    provider_name.upper(),
+                    attempt,
+                    OLLAMA_MAX_RETRIES,
+                    str(e)
+                )
+            except httpx.RequestError as e:
+                last_exception = e
+                logger.warning(
+                    "%s request error on attempt %s/%s: %s",
+                    provider_name.upper(),
+                    attempt,
+                    OLLAMA_MAX_RETRIES,
+                    str(e)
+                )
+            except Exception as e:
+                last_exception = e
+                logger.error(
+                    "%s request failed on attempt %s/%s: %s",
+                    provider_name.upper(),
+                    attempt,
+                    OLLAMA_MAX_RETRIES,
+                    str(e),
+                    exc_info=True
+                )
+
+            if assistant_buf:
+                logger.info("%s streaming succeeded on attempt %s", provider_name.upper(), attempt)
+                return
+
+            if attempt < OLLAMA_MAX_RETRIES:
+                logger.info(
+                    "Retrying %s stream (next attempt %s/%s) after %.2f seconds",
+                    provider_name.upper(),
+                    attempt + 1,
+                    OLLAMA_MAX_RETRIES,
+                    OLLAMA_RETRY_DELAY_SECONDS
+                )
+                await asyncio.sleep(OLLAMA_RETRY_DELAY_SECONDS)
+
+        if not assistant_buf:
+            if last_exception:
+                logger.error(
+                    "%s streaming failed after %s attempts: %s",
+                    provider_name.upper(),
+                    OLLAMA_MAX_RETRIES,
+                    str(last_exception)
+                )
+                yield f"\n[LLM API **错误**] {str(last_exception)}\n"
+            else:
+                logger.warning(
+                    "%s streaming produced no content after %s attempts without explicit exception",
+                    provider_name.upper(),
+                    OLLAMA_MAX_RETRIES
+                )
+                yield "\n[LLM warning] 模型未返回内容，请稍后重试或检查日志。\n"
+            return
+
+    stream_provider = env.get("provider", "ollama").lower()
+    if stream_provider == "ollama":
+        stream_fn = ollama_stream
+    else:
+        stream_fn = api_stream
+
+    return StreamingResponse(stream_fn(), media_type="text/plain; charset=utf-8")
 
 
 

@@ -2,6 +2,7 @@ import io
 import json
 import random
 import os
+import copy
 from base64 import b64encode
 from typing import List, Dict, Any, Optional
 import time
@@ -10,7 +11,7 @@ from PIL import Image, ImageDraw, ImageFont
 from tqdm import tqdm
 from dotenv import load_dotenv
 
-from datatype import PatientData, ImageInfo, EyePrediction, EyePredictionThresholds, EyeDiagnosis, CATARACT_EXTERNAL_THRESHOLD
+from datatype import PatientData, ImageInfo, CATARACT_EXTERNAL_THRESHOLD
 
 # Load environment variables
 load_dotenv()
@@ -62,6 +63,20 @@ def _extract_diseases_from_img(img: Dict[str, Any]) -> Dict[str, float]:
     return {}
 
 
+def _normalize_probability_map(raw_probs: Optional[Dict[str, float]], alias_map: Dict[str, str], disease_keys: List[str]) -> Dict[str, float]:
+    normalized: Dict[str, float] = {}
+    if not raw_probs:
+        raw_probs = {}
+    for raw_key, value in raw_probs.items():
+        canonical = alias_map.get(raw_key)
+        if not canonical:
+            canonical = alias_map.get(str(raw_key).lower(), raw_key)
+        normalized[canonical] = float(value)
+    for disease_key in disease_keys:
+        normalized.setdefault(disease_key, 0.0)
+    return normalized
+
+
 def _pick_latest_by_type(images_json_list: List[Dict[str, Any]], desired_type: str):
     """
     From RAW v2 images, pick the one with mapped type == desired_type and latest timestamp by img_path.
@@ -94,23 +109,26 @@ def read_image(image_path):
 
 
 # --- Load a single patient from JSON (Optimized) ---
-def _build_patient_data_from_payload(patient_id: str, pdata: Dict[str, Any], base_dir: str) -> PatientData:
+def _build_patient_data_from_payload(
+    patient_id: str,
+    pdata: Dict[str, Any],
+    base_dir: str,
+    model_cfg: Dict[str, Any],
+    exam_date: Optional[str] = None,
+) -> PatientData:
     """Transform a preloaded patient payload into a PatientData object."""
     default_image_quality = ""
-    diagnosis_mapping = {
-        "青光眼": "青光眼",
-        "糖尿病性视网膜病变": "糖网",
-        "年龄相关性黄斑变性": "AMD",
-        "病理性近视": "病理性近视",
-        "视网膜静脉阻塞（RVO）": "RVO",
-        "视网膜动脉阻塞（RAO）": "RAO",
-        "视网膜脱离（RD）": "视网膜脱离",
-        "其他视网膜病": "其它视网膜病",
-        "其他黄斑病变": "其它黄斑病变",
-        "白内障": "白内障",
-        "正常": "正常"
-    }
-    prediction_thresholds = EyePredictionThresholds.get_threshold_set_1()  # Default to set 1
+    disease_entries = model_cfg.get("diseases") or []
+    disease_keys = [entry.get("key") for entry in disease_entries if entry.get("key")]
+    alias_map = model_cfg.get("disease_alias_map", {})
+    if not disease_keys:
+        # fallback to alias map keys if config missing entries
+        disease_keys = sorted(set(alias_map.values()))
+    threshold_sets = model_cfg.get("threshold_sets") or []
+    threshold_set_indices = model_cfg.get("threshold_set_indices", {})
+    default_set_id = model_cfg.get("default_threshold_set_id") or (threshold_sets[0]["id"] if threshold_sets else None)
+    active_idx = threshold_set_indices.get(default_set_id, 0)
+    active_thresholds = dict(threshold_sets[active_idx]["values"]) if threshold_sets else {}
 
     # Extract name and examine_time if available
     name = pdata.get("name")
@@ -119,6 +137,8 @@ def _build_patient_data_from_payload(patient_id: str, pdata: Dict[str, Any], bas
     # Process only this patient's images
     eye_images = []
     for img in pdata.get("images", []):
+        if not isinstance(img, dict):
+            continue
         eye_cls = (img.get("eye_classification", {}) or {}).get("class", "")
         img_type = _map_eye_class_to_type(eye_cls) or ""
         img_quality = default_image_quality
@@ -133,67 +153,70 @@ def _build_patient_data_from_payload(patient_id: str, pdata: Dict[str, Any], bas
             id=f"img_{patient_id}_{img.get('img_path', '')}",
             type=img_type,
             quality=img_quality,
-            base64_data=base64_data
+            base64_data=base64_data or ""
         ))
 
     # Process prediction results
-    prediction_results = {}
+    prediction_results: Dict[str, Dict[str, float]] = {}
     ext_cataract_used = {"left_eye": False, "right_eye": False}
+
+    image_list = pdata.get("images", [])
+
     for eye in ["left_eye", "right_eye"]:
         cfp_type = "左眼CFP" if eye == "left_eye" else "右眼CFP"
         ext_type = "左眼外眼照" if eye == "left_eye" else "右眼外眼照"
-        cfp_img = _pick_latest_by_type(pdata.get("images", []), cfp_type)
-        ext_img = _pick_latest_by_type(pdata.get("images", []), ext_type)
+        cfp_img = _pick_latest_by_type(image_list, cfp_type)
+        ext_img = _pick_latest_by_type(image_list, ext_type)
 
         if cfp_img:
-            cfp_probs_raw = _extract_diseases_from_img(cfp_img)
-            cfp_probs = {diagnosis_mapping.get(k, k): v for k, v in cfp_probs_raw.items()}
+            cfp_probs = _normalize_probability_map(_extract_diseases_from_img(cfp_img), alias_map, disease_keys)
         else:
-            cfp_probs = {disease: 0.0 for disease in diagnosis_mapping.values()}
+            cfp_probs = {disease: 0.0 for disease in disease_keys}
 
-        ext_probs = None
+        ext_probs = {}
         if ext_img:
-            ext_probs_raw = _extract_diseases_from_img(ext_img)
-            if ext_probs_raw:
-                ext_probs = {diagnosis_mapping.get(k, k): v for k, v in ext_probs_raw.items()}
+            ext_probs = _normalize_probability_map(_extract_diseases_from_img(ext_img), alias_map, disease_keys)
 
-        probs = dict(cfp_probs)
-        if ext_probs is not None and "白内障" in ext_probs:
-            probs["白内障"] = ext_probs["白内障"]
+        combined = dict(cfp_probs)
+        if "白内障" in ext_probs:
+            combined["白内障"] = ext_probs["白内障"]
             ext_cataract_used[eye] = True
 
-        prediction_results[eye] = EyePrediction(**probs)
+        prediction_results[eye] = {key: float(combined.get(key, 0.0)) for key in disease_keys}
 
-    # If either eye uses external-eye cataract probability, reflect that in thresholds for UI
-    if ext_cataract_used["left_eye"] or ext_cataract_used["right_eye"]:
-        setattr(prediction_thresholds, "白内障", CATARACT_EXTERNAL_THRESHOLD)
+    # Adjust cataract thresholds if external eye probabilities are used
+    adjusted_thresholds = dict(active_thresholds)
+    if (ext_cataract_used["left_eye"] or ext_cataract_used["right_eye"]) and "白内障" in adjusted_thresholds:
+        adjusted_thresholds["白内障"] = CATARACT_EXTERNAL_THRESHOLD
 
     # Diagnosis results (thresholding)
-    diagnosis_results = {}
+    diagnosis_results: Dict[str, Dict[str, bool]] = {}
     for eye in ["left_eye", "right_eye"]:
         diag = {}
-        for disease, threshold in prediction_thresholds.dict().items():
-            if disease == "白内障" and ext_cataract_used.get(eye, False):
-                threshold_to_use = CATARACT_EXTERNAL_THRESHOLD
-            else:
-                threshold_to_use = threshold
-            prob = getattr(prediction_results[eye], disease, 0.0)
-            diag[disease] = prob >= threshold_to_use
-        diagnosis_results[eye] = EyeDiagnosis(**diag)
+        for disease, threshold in adjusted_thresholds.items():
+            prob = float(prediction_results.get(eye, {}).get(disease, 0.0))
+            diag[disease] = prob >= float(threshold)
+        diagnosis_results[eye] = diag
 
     return PatientData(
         patient_id=patient_id,
-        name=name,  # Added name field
-        examine_time=examine_time,  # Added examine_time field
+        name=name,
+        examine_time=examine_time,
         eye_images=eye_images,
         prediction_results=prediction_results,
-        prediction_thresholds=prediction_thresholds,
+        prediction_thresholds=adjusted_thresholds,
         diagnosis_results=diagnosis_results,
-        active_threshold_set=0  # Default to threshold set 1
+        active_threshold_set=active_idx,
+        active_threshold_set_id=threshold_sets[active_idx]["id"] if threshold_sets else None,
+        active_threshold_set_index=active_idx,
+        threshold_sets=copy.deepcopy(threshold_sets),
+        model_id=model_cfg.get("id"),
+        model_name=model_cfg.get("name"),
+        diseases=model_cfg.get("diseases", []),
     )
 
 
-def load_single_patient_data(data_path: str, patient_id: str) -> PatientData:
+def load_single_patient_data(data_path: str, patient_id: str, model_cfg: Dict[str, Any]) -> PatientData:
     """
     Load and parse a single patient's data from a JSON file by patient_id.
     Returns a PatientData object or raises KeyError if not found.
@@ -206,16 +229,16 @@ def load_single_patient_data(data_path: str, patient_id: str) -> PatientData:
         raise KeyError(f"Patient {patient_id} not found in {data_path}")
 
     base_dir = os.path.dirname(data_path)
-    return _build_patient_data_from_payload(patient_id, all_data[patient_id], base_dir)
+    return _build_patient_data_from_payload(patient_id, all_data[patient_id], base_dir, model_cfg)
 
 
-def load_patient_from_record(patient_id: str, payload: Dict[str, Any], base_dir: str) -> PatientData:
+def load_patient_from_record(patient_id: str, payload: Dict[str, Any], base_dir: str, model_cfg: Dict[str, Any], exam_date: Optional[str] = None) -> PatientData:
     """Public helper to build PatientData from preloaded JSON payload and base directory."""
     if not isinstance(payload, dict):
         raise ValueError("payload must be a dict containing patient data")
-    return _build_patient_data_from_payload(patient_id, payload, base_dir)
+    return _build_patient_data_from_payload(patient_id, payload, base_dir, model_cfg, exam_date=exam_date)
 
-def load_batch_patient_data(data_path=None) -> List[PatientData]:
+def load_batch_patient_data(model_cfg: Dict[str, Any], data_path=None) -> List[PatientData]:
     """
     Load and parse a batch of patient data from a JSON file.
     Returns a list of PatientData objects.
@@ -247,7 +270,7 @@ def load_batch_patient_data(data_path=None) -> List[PatientData]:
 
     patients = []
     for pid, pdata in tqdm(data.items(), desc="Loading patient data"):
-        patients.append(_build_patient_data_from_payload(pid, pdata, os.path.dirname(data_path)))
+        patients.append(_build_patient_data_from_payload(pid, pdata, os.path.dirname(data_path), model_cfg))
     return patients
 
 
@@ -277,6 +300,17 @@ def generate_random_image_base64(text: str, color: tuple) -> str:
     return b64encode(buffered.getvalue()).decode("utf-8")
 
 
+DUMMY_DISEASE_KEYS = ["青光眼", "糖网", "AMD", "病理性近视", "RVO", "RAO", "视网膜脱离", "其它视网膜病", "其它黄斑病变", "白内障", "正常"]
+DUMMY_THRESHOLD_SETS = [
+    {
+        "id": "set_1",
+        "name": "示例阈值",
+        "description": "用于占位的数据集",
+        "values": {key: 0.5 for key in DUMMY_DISEASE_KEYS},
+    }
+]
+
+
 def create_single_dummy_patient_data() -> PatientData:
     """Creates dummy patient data including random predictions and derived diagnoses."""
     patient_id = f"external_trigger_{int(time.time())}_{random.randint(100, 999)}"
@@ -298,24 +332,18 @@ def create_single_dummy_patient_data() -> PatientData:
             base64_data=base64_data
         ))
 
-    # --- Prediction Thresholds ---
-    prediction_thresholds = EyePredictionThresholds.get_threshold_set_1()  # Default to set 1
-
     # --- Random Predictions ---
-    def random_prediction() -> EyePrediction:
-        # Bias probabilities around thresholds: sample from uniform but occasionally spike
+    def random_prediction() -> Dict[str, float]:
         probs = {}
-        for field_name in EyePrediction.__fields__.keys():
-            base = random.random()
-            # 20% chance to concentrate near threshold region (±0.1) to exercise UI at decision boundary
-            threshold_val = getattr(prediction_thresholds, field_name, 0.5)
+        for key in DUMMY_DISEASE_KEYS:
+            threshold_val = DUMMY_THRESHOLD_SETS[0]["values"].get(key, 0.5)
             if random.random() < 0.2:
-                jitter = (random.random() - 0.5) * 0.2  # ±0.1
+                jitter = (random.random() - 0.5) * 0.2
                 val = min(1.0, max(0.0, threshold_val + jitter))
             else:
-                val = base
-            probs[field_name] = round(val, 4)
-        return EyePrediction(**probs)
+                val = random.random()
+            probs[key] = round(val, 4)
+        return probs
 
     left_pred = random_prediction()
     right_pred = random_prediction()
@@ -325,14 +353,12 @@ def create_single_dummy_patient_data() -> PatientData:
         "right_eye": right_pred
     }
 
-    # --- Derive Diagnosis from Predictions & Thresholds ---
-    def derive_diagnosis(pred: EyePrediction) -> EyeDiagnosis:
+    def derive_diagnosis(probs: Dict[str, float]) -> Dict[str, bool]:
         diag_flags = {}
-        for disease in EyeDiagnosis.__fields__.keys():
-            threshold_val = getattr(prediction_thresholds, disease, 0.5)
-            prob_val = getattr(pred, disease, 0.0)
+        for disease, threshold_val in DUMMY_THRESHOLD_SETS[0]["values"].items():
+            prob_val = probs.get(disease, 0.0)
             diag_flags[disease] = prob_val >= threshold_val
-        return EyeDiagnosis(**diag_flags)
+        return diag_flags
 
     diagnosis_results = {
         "left_eye": derive_diagnosis(left_pred),
@@ -342,10 +368,16 @@ def create_single_dummy_patient_data() -> PatientData:
     return PatientData(
         patient_id=patient_id,
         eye_images=eye_images,
-        prediction_thresholds=prediction_thresholds,
+        prediction_thresholds=DUMMY_THRESHOLD_SETS[0]["values"].copy(),
         prediction_results=prediction_results,
         diagnosis_results=diagnosis_results,
-        active_threshold_set=0  # Default to threshold set 1
+        active_threshold_set=0,
+        active_threshold_set_id=DUMMY_THRESHOLD_SETS[0]["id"],
+        active_threshold_set_index=0,
+        threshold_sets=copy.deepcopy(DUMMY_THRESHOLD_SETS),
+        model_id="dummy",
+        model_name="Dummy Model",
+        diseases=[{"key": key, "label_cn": key, "label_en": key, "short_name": key} for key in DUMMY_DISEASE_KEYS],
     )
 
 def create_batch_dummy_patient_data(num_patients: int = 5) -> List[PatientData]:

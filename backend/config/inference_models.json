@@ -1,0 +1,102 @@
+[
+  {
+    "id": "baseline",
+    "name": "Baseline Model",
+    "priority": 100,
+    "root": "../data",
+    "diseases": [
+      { "key": "青光眼", "label_cn": "青光眼", "label_en": "Glaucoma", "short_name": "Glaucoma", "aliases": ["青光眼"] },
+      { "key": "糖网", "label_cn": "糖网", "label_en": "Diabetic Retinopathy", "short_name": "DR", "aliases": ["糖尿病性视网膜病变", "糖网"] },
+      { "key": "AMD", "label_cn": "年龄相关性黄斑变性", "label_en": "Age-related Macular Degeneration", "short_name": "AMD", "aliases": ["年龄相关性黄斑变性", "AMD"] },
+      { "key": "病理性近视", "label_cn": "病理性近视", "label_en": "Pathological Myopia", "short_name": "PM", "aliases": ["病理性近视"] },
+      { "key": "RVO", "label_cn": "视网膜静脉阻塞", "label_en": "Retinal Vein Occlusion", "short_name": "RVO", "aliases": ["视网膜静脉阻塞", "视网膜静脉阻塞（RVO）", "RVO"] },
+      { "key": "RAO", "label_cn": "视网膜动脉阻塞", "label_en": "Retinal Artery Occlusion", "short_name": "RAO", "aliases": ["视网膜动脉阻塞", "视网膜动脉阻塞（RAO）", "RAO"] },
+      { "key": "视网膜脱离", "label_cn": "视网膜脱离", "label_en": "Retinal Detachment", "short_name": "RD", "aliases": ["视网膜脱离", "视网膜脱离（RD）"] },
+      { "key": "其它视网膜病", "label_cn": "其它视网膜病", "label_en": "Other Retinal Diseases", "short_name": "Other Retinal", "aliases": ["其它视网膜病", "其他视网膜病"] },
+      { "key": "其它黄斑病变", "label_cn": "其它黄斑病变", "label_en": "Other Macular Diseases", "short_name": "Other Macular", "aliases": ["其它黄斑病变", "其他黄斑病变"] },
+      { "key": "白内障", "label_cn": "白内障", "label_en": "Cataract", "short_name": "Cataract", "aliases": ["白内障"] },
+      { "key": "正常", "label_cn": "正常", "label_en": "Normal", "short_name": "Normal", "aliases": ["正常", "Normal"], "is_normal": true }
+    ],
+    "threshold_sets": [
+      {
+        "id": "set_a",
+        "name": "推荐阈值",
+        "description": "基准阈值",
+        "values": {
+          "青光眼": 0.2,
+          "糖网": 0.28,
+          "AMD": 0.25,
+          "病理性近视": 0.18,
+          "RVO": 0.2,
+          "RAO": 0.18,
+          "视网膜脱离": 0.18,
+          "其它视网膜病": 0.25,
+          "其它黄斑病变": 0.23,
+          "白内障": 0.28,
+          "正常": 0.5
+        }
+      },
+      {
+        "id": "set_b",
+        "name": "敏感阈值",
+        "description": "备选阈值",
+        "values": {
+          "青光眼": 0.18,
+          "糖网": 0.23,
+          "AMD": 0.18,
+          "病理性近视": 0.18,
+          "RVO": 0.18,
+          "RAO": 0.15,
+          "视网膜脱离": 0.15,
+          "其它视网膜病": 0.35,
+          "其它黄斑病变": 0.5,
+          "白内障": 0.33,
+          "正常": 0.38
+        }
+      }
+    ],
+    "default_threshold_set_id": "set_a"
+  },
+  {
+    "id": "focal",
+    "name": "Focal Model",
+    "priority": 110,
+    "root": "../data_new",
+    "diseases": [
+      { "key": "Healthy", "label_cn": "健康", "label_en": "Healthy", "short_name": "Healthy", "aliases": ["Healthy"], "is_normal": true },
+      { "key": "DR", "label_cn": "糖尿病视网膜病变", "label_en": "Diabetic Retinopathy", "short_name": "DR", "aliases": ["DR"] },
+      { "key": "Glaucoma", "label_cn": "青光眼", "label_en": "Glaucoma", "short_name": "Glaucoma", "aliases": ["Glaucoma"] },
+      { "key": "AMD", "label_cn": "年龄相关性黄斑变性", "label_en": "Age-related Macular Degeneration", "short_name": "AMD", "aliases": ["AMD"] },
+      { "key": "Cataract", "label_cn": "白内障", "label_en": "Cataract", "short_name": "Cataract", "aliases": ["Cataract"] },
+      { "key": "RVO", "label_cn": "视网膜静脉阻塞", "label_en": "Retinal Vein Occlusion", "short_name": "RVO", "aliases": ["RVO"] },
+      { "key": "PM", "label_cn": "病理性近视", "label_en": "Pathologic Myopia", "short_name": "PM", "aliases": ["PM"] }
+    ],
+    "diseases_commented": [
+      { "key": "DR1", "label_cn": "轻度糖尿病视网膜病变", "label_en": "Mild Diabetic Retinopathy", "short_name": "DR1", "aliases": ["DR1"], "parent_key": "DR" },
+      { "key": "DR2", "label_cn": "中度糖尿病视网膜病变", "label_en": "Moderate Diabetic Retinopathy", "short_name": "DR2", "aliases": ["DR2"], "parent_key": "DR" },
+      { "key": "DR3", "label_cn": "重度非增殖性糖尿病视网膜病变", "label_en": "Severe Non-Proliferative Diabetic Retinopathy", "short_name": "DR3", "aliases": ["DR3"], "parent_key": "DR" },
+      { "key": "DR4", "label_cn": "增殖性糖尿病视网膜病变", "label_en": "Proliferative Diabetic Retinopathy", "short_name": "DR4", "aliases": ["DR4"], "parent_key": "DR" }
+    ],
+    "threshold_sets": [
+      {
+        "id": "set_focal",
+        "name": "Focal Thresholds",
+        "description": "Provided by Focal model",
+        "values": {
+          "Healthy": 0.14,
+          "DR1": 0.12,
+          "DR2": 0.26,
+          "DR3": 0.4,
+          "DR4": 0.43,
+          "DR": 0.27,
+          "Glaucoma": 0.25,
+          "AMD": 0.98,
+          "Cataract": 0.94,
+          "RVO": 0.94,
+          "PM": 0.92
+        }
+      }
+    ],
+    "default_threshold_set_id": "set_focal"
+  }
+]

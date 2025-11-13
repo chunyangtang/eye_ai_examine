@@ -37,6 +37,17 @@ For other computers in the local network, open `http://<your-ip-address>:3000`.
 
 Use `http://<your-ip-address>:3000/?ris_exam_id=<exam_id>` to access a specific exam.
 
+### LLM Configuration
+
+The backend supports both the previous remote LLM API flow and the newer local Ollama deployment. Configuration lives in the `.env` file at the project root.
+
+- `LLM_PROVIDER` – set to `ollama` for local models or `api` for any OpenAI-compatible HTTPS endpoint.
+- `LLM_API_BASE` – the base URL (e.g. `http://localhost:11434` for Ollama or `https://api.openai.com` for OpenAI). Use `LLM_CHAT_ENDPOINT` if the chat path differs from the default (`/api/chat` for Ollama, `/v1/chat/completions` otherwise).
+- `LLM_MODEL` – Ollama model tag (e.g. `DeepSeek-3.1:latest`) or remote model id (e.g. `gpt-4o-mini`).
+- `LLM_API_KEY` – required only when `LLM_PROVIDER=api`.
+
+Restart the backend after changing these settings so FastAPI can pick up the new environment variables.
+
 
 ## Description
 
