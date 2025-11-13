@@ -2518,10 +2518,14 @@ def _llm_env():
         endpoint = "/api/chat" if provider == "ollama" else "/v1/chat/completions"
 
     model_default = "DeepSeek-3.1:latest" if provider == "ollama" else "gpt-4o-mini"
-    try:
-        temperature = float(os.getenv("LLM_TEMPERATURE", "0.2"))
-    except ValueError:
-        temperature = 0.2
+
+    temperature_value: Optional[float] = None
+    temperature_raw = os.getenv("LLM_TEMPERATURE")
+    if temperature_raw is not None:
+        try:
+            temperature_value = float(temperature_raw)
+        except ValueError:
+            logger.warning("Invalid LLM_TEMPERATURE value '%s'; ignoring", temperature_raw)
 
     return {
         "base": base.rstrip("/"),
@@ -2529,7 +2533,7 @@ def _llm_env():
         "provider": provider,
         "api_key": os.getenv("LLM_API_KEY"),
         "chat_endpoint": endpoint,
-        "temperature": temperature,
+        "temperature": temperature_value,
     }
 
 @app.post("/api/llm_chat_stream")
@@ -2877,8 +2881,9 @@ async def llm_chat_stream(req: LLMChatRequest):
             "model": env["model"],
             "messages": messages_to_send,
             "stream": True,
-            "temperature": env.get("temperature", 0.2),
         }
+        if env.get("temperature") is not None:
+            payload["temperature"] = env["temperature"]
 
         headers = {"Content-Type": "application/json"}
         api_key = (env.get("api_key") or "").strip()

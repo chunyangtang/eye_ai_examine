@@ -45,6 +45,7 @@ The backend supports both the previous remote LLM API flow and the newer local O
 - `LLM_API_BASE` – the base URL (e.g. `http://localhost:11434` for Ollama or `https://api.openai.com` for OpenAI). Use `LLM_CHAT_ENDPOINT` if the chat path differs from the default (`/api/chat` for Ollama, `/v1/chat/completions` otherwise).
 - `LLM_MODEL` – Ollama model tag (e.g. `DeepSeek-3.1:latest`) or remote model id (e.g. `gpt-4o-mini`).
 - `LLM_API_KEY` – required only when `LLM_PROVIDER=api`.
+- `LLM_TEMPERATURE` – optional; set only if the remote provider allows overriding temperature (otherwise the backend omits the field and the provider falls back to its default).
 
 Restart the backend after changing these settings so FastAPI can pick up the new environment variables.
 
