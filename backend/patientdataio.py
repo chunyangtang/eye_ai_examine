@@ -213,6 +213,7 @@ def _build_patient_data_from_payload(
         model_id=model_cfg.get("id"),
         model_name=model_cfg.get("name"),
         diseases=model_cfg.get("diseases", []),
+        disease_alias_map=alias_map,
     )
 
 
@@ -378,6 +379,7 @@ def create_single_dummy_patient_data() -> PatientData:
         model_id="dummy",
         model_name="Dummy Model",
         diseases=[{"key": key, "label_cn": key, "label_en": key, "short_name": key} for key in DUMMY_DISEASE_KEYS],
+        disease_alias_map={key: key for key in DUMMY_DISEASE_KEYS},
     )
 
 def create_batch_dummy_patient_data(num_patients: int = 5) -> List[PatientData]:

@@ -63,6 +63,20 @@ const IconButton = ({ children, onClick, className = '' }) => (
   </button>
 );
 
+const MaintenanceScreen = ({ message, onRetry }) => (
+  <div className="min-h-screen bg-slate-900 text-white flex items-center justify-center px-6">
+    <div className="max-w-xl text-center space-y-4">
+      <div className="flex items-center justify-center gap-3 text-slate-200">
+        <span className="text-3xl font-semibold tracking-tight">系统维护中</span>
+        <span className="h-3 w-3 rounded-full bg-amber-400 animate-pulse"></span>
+      </div>
+      <p className="text-slate-200 text-lg leading-relaxed">
+        {message || '服务升级维护中，请稍后再试。'}
+      </p>
+    </div>
+  </div>
+);
+
 // Reselect Image Modal Component
 const ReselectImageModal = ({ isOpen, onClose, allImages, onSelectImages, selectedImageIds }) => {
   // Fixed slot configuration with proper order: 右眼CFP, 左眼CFP, 右眼外眼照, 左眼外眼照
@@ -401,6 +415,101 @@ const MANUAL_DISEASE_INFO = {
     fullName: '正常 (Normal)',
     shortName: 'Normal'
   }
+};
+
+const CROSS_DISEASE_ALIAS_GROUPS = [
+  ['青光眼', 'Glaucoma'],
+  ['糖网', '糖尿病性视网膜病变', '糖尿病视网膜病变', 'Diabetic Retinopathy', 'DR'],
+  ['AMD', '年龄相关性黄斑变性', 'Age-related Macular Degeneration'],
+  ['病理性近视', '高度近视', 'Pathological Myopia', 'Pathologic Myopia', 'PM'],
+  ['RVO', '视网膜静脉阻塞', '视网膜静脉阻塞（RVO）', 'Retinal Vein Occlusion'],
+  ['RAO', '视网膜动脉阻塞', '视网膜动脉阻塞（RAO）', 'Retinal Artery Occlusion'],
+  ['视网膜脱离', '视网膜脱离（RD）', 'Retinal Detachment', 'RD'],
+  ['其它视网膜病', '其他视网膜病', 'Other Retinal Diseases', 'Other Retinal'],
+  ['其它黄斑病变', '其他黄斑病变', 'Other Macular Diseases', 'Other Macular'],
+  ['其它眼底病变', '其他眼底病变', 'Other Fundus Diseases', 'Other Fundus'],
+  ['白内障', 'Cataract'],
+  ['正常', 'Normal', 'Healthy']
+];
+
+const buildDiseaseAliasMap = (diseases, seedMap = {}) => {
+  const aliasMap = {};
+  const diseaseEntries = Array.isArray(diseases) ? diseases : [];
+  const diseaseKeySet = new Set();
+
+  // Start with any backend-provided alias map.
+  Object.entries(seedMap || {}).forEach(([alias, key]) => {
+    if (typeof alias === 'string' && typeof key === 'string') {
+      aliasMap[alias] = key;
+      aliasMap[alias.toLowerCase()] = key;
+    }
+  });
+
+  // Add aliases from disease definitions.
+  diseaseEntries.forEach((entry) => {
+    const key = entry?.key;
+    if (!key) return;
+    diseaseKeySet.add(key);
+    const aliases = Array.isArray(entry.aliases)
+      ? entry.aliases
+      : entry?.aliases
+        ? [entry.aliases]
+        : [];
+    const aliasList = [...aliases, key];
+    aliasList.forEach((alias) => {
+      if (typeof alias !== 'string') return;
+      aliasMap[alias] = key;
+      aliasMap[alias.toLowerCase()] = key;
+    });
+  });
+
+  // Expand with cross-language/common groups so manual data can be mapped.
+  CROSS_DISEASE_ALIAS_GROUPS.forEach((group) => {
+    const canonical =
+      group.find((name) => diseaseKeySet.has(name)) ||
+      group.find((name) => aliasMap[name]);
+    if (!canonical) return;
+    group.forEach((alias) => {
+      if (typeof alias !== 'string') return;
+      aliasMap[alias] = canonical;
+      aliasMap[alias.toLowerCase()] = canonical;
+    });
+  });
+
+  return aliasMap;
+};
+
+const normalizeManualDiagnosis = (rawManualDiagnosis, diseaseKeys, aliasMap) => {
+  const keys = Array.isArray(diseaseKeys) ? diseaseKeys : [];
+  const normalizeKey = (key) => {
+    if (!key) return key;
+    if (aliasMap?.[key]) return aliasMap[key];
+    const lower = String(key).toLowerCase();
+    return aliasMap?.[lower] || key;
+  };
+
+  const ensureEyeData = (eyeData) => {
+    const normalized = {};
+    if (eyeData && typeof eyeData === 'object') {
+      Object.entries(eyeData).forEach(([rawKey, value]) => {
+        const canonical = normalizeKey(rawKey);
+        if (keys.includes(canonical)) {
+          normalized[canonical] = Boolean(value);
+        }
+      });
+    }
+    keys.forEach((key) => {
+      if (normalized[key] === undefined) {
+        normalized[key] = false;
+      }
+    });
+    return normalized;
+  };
+
+  return {
+    left_eye: ensureEyeData(rawManualDiagnosis?.left_eye),
+    right_eye: ensureEyeData(rawManualDiagnosis?.right_eye)
+  };
 };
 
 // New Expanded Image Modal Component
@@ -784,16 +893,51 @@ function App() {
   const backendUrl = `http://${backendHost}:8000`;
   const urlParams = new URLSearchParams(window.location.search);
   const currentExamId = urlParams.get('ris_exam_id');
+  const maintenanceFallbackMessage = '系统维护中，请稍后再试。';
+  const [maintenanceStatus, setMaintenanceStatus] = useState({
+    checked: false,
+    enabled: false,
+    message: '',
+  });
 
   // Prefer patientData.patient_id; fallback to patientData.id; else ris_exam_id
   const getCurrentPatientId = useMemo(() => {
     return () => (patientData?.patient_id || patientData?.id || currentExamId || '').toString();
   }, [patientData?.patient_id, patientData?.id, currentExamId]);
 
+  const refreshMaintenanceStatus = useCallback(async () => {
+    try {
+      const res = await fetch(`${backendUrl}/api/maintenance`, { cache: 'no-store' });
+      if (!res.ok) {
+        setMaintenanceStatus((prev) => ({ ...prev, checked: true }));
+        return;
+      }
+      const data = await res.json();
+      setMaintenanceStatus({
+        checked: true,
+        enabled: !!data.enabled,
+        message: data.message || maintenanceFallbackMessage,
+      });
+    } catch {
+      setMaintenanceStatus((prev) => ({
+        ...prev,
+        checked: true,
+        message: prev.message || maintenanceFallbackMessage,
+      }));
+    }
+  }, [backendUrl, maintenanceFallbackMessage]);
+
+  useEffect(() => {
+    refreshMaintenanceStatus();
+    const intervalId = setInterval(refreshMaintenanceStatus, 5 * 60 * 1000);
+    return () => clearInterval(intervalId);
+  }, [refreshMaintenanceStatus]);
+
   const [llmConfig, setLlmConfig] = useState({ update_prompt: '' });
 
   // Load available inference models once
   useEffect(() => {
+    if (!maintenanceStatus.checked || maintenanceStatus.enabled) return;
     let cancelled = false;
     const loadModels = async () => {
       setIsLoadingModels(true);
@@ -819,7 +963,7 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [backendUrl, activeModelId, currentExamDate]);
+  }, [backendUrl, activeModelId, currentExamDate, maintenanceStatus.checked, maintenanceStatus.enabled]);
 
 
     // 添加：获取所有可用患者姓名
@@ -993,8 +1137,11 @@ function App() {
       const fetchTime = performance.now() - startTime;
       console.log(`Successfully fetched patient data in ${fetchTime.toFixed(2)}ms`);
 
+      const diseaseAliasMap = buildDiseaseAliasMap(result?.diseases, result?.disease_alias_map);
+      const normalizedResult = { ...result, disease_alias_map: diseaseAliasMap };
+
       // Store a pristine copy of the data for tracking changes.
-      const dataWithOriginal = { ...result, original: JSON.parse(JSON.stringify(result)) };
+      const dataWithOriginal = { ...normalizedResult, original: JSON.parse(JSON.stringify(normalizedResult)) };
 
       setPatientData(dataWithOriginal);
 
@@ -1023,6 +1170,46 @@ function App() {
       setLoading(false);
       setHasUnsavedChanges(false);
 
+      const diseaseKeys = Array.isArray(normalizedResult?.diseases) && normalizedResult.diseases.length > 0
+        ? normalizedResult.diseases.map((entry) => entry.key)
+        : DEFAULT_DISEASE_ORDER;
+
+      const calculateScore = (prob, threshold) => {
+        const t = typeof threshold === 'number' && threshold > 0 ? threshold : 0.5;
+        // Score how far above threshold the prediction sits; negative if below threshold.
+        const margin = prob - t;
+        return margin / Math.max(1 - t, 1e-6);
+      };
+
+      const getPrimaryAIDisease = (data, eyeKey) => {
+        const preds = data?.prediction_results?.[eyeKey];
+        if (!preds) return null;
+
+        const thresholds = (data?.prediction_thresholds && data.prediction_thresholds) || {};
+        let best = null;
+
+        Object.entries(preds).forEach(([diseaseKey, probValue]) => {
+          if (!diseaseKeys.includes(diseaseKey)) return;
+          const threshold = typeof thresholds[diseaseKey] === 'number' ? thresholds[diseaseKey] : 0.5;
+          const prob = typeof probValue === 'number' ? probValue : 0;
+          const score = calculateScore(prob, threshold);
+
+          if (!best || score > best.score) {
+            best = { diseaseKey, score };
+          }
+        });
+
+        return best?.diseaseKey || null;
+      };
+
+      const buildInitialManualDiagnosis = (eyeKey) => {
+        const primaryDisease = getPrimaryAIDisease(normalizedResult, eyeKey);
+        return diseaseKeys.reduce((acc, diseaseKey) => {
+          acc[diseaseKey] = primaryDisease === diseaseKey;
+          return acc;
+        }, {});
+      };
+
       // Load manual diagnosis data if available, otherwise initialize with AI predictions
       try {
         const manualUrl = currentExamDate 
@@ -1042,11 +1229,12 @@ function App() {
           
           if (hasManualDiagnosisData) {
             // Ensure the structure has left_eye and right_eye objects
-            const validatedDiagnosis = {
-              left_eye: manualData.manual_diagnosis.left_eye || {},
-              right_eye: manualData.manual_diagnosis.right_eye || {}
-            };
-            setManualDiagnosis(validatedDiagnosis);
+            const normalizedManual = normalizeManualDiagnosis(
+              manualData.manual_diagnosis,
+              diseaseKeys,
+              diseaseAliasMap
+            );
+            setManualDiagnosis(normalizedManual);
             manualDataLoaded = true;
           }
           if (manualData.custom_diseases) {
@@ -1059,50 +1247,6 @@ function App() {
         
         // If no saved manual diagnosis exists, initialize with AI predictions
         if (!manualDataLoaded) {
-          // List of disease keys that should be checked in manual diagnosis
-        const diseaseKeys = Array.isArray(result?.diseases) && result.diseases.length > 0
-          ? result.diseases.map((entry) => entry.key)
-          : DEFAULT_DISEASE_ORDER;
-          
-          // Helper to calculate score (probability relative to threshold)
-          const calculateScore = (prob, threshold) => {
-            if (prob >= threshold * 2) return prob / (threshold * 2);
-            if (prob >= threshold) return 0.5 + (prob - threshold) / threshold * 0.3;
-            if (prob >= threshold * 0.5) return 0.2 + (prob - threshold * 0.5) / (threshold * 0.5) * 0.3;
-            return prob / (threshold * 0.5) * 0.2;
-          };
-          
-          const getPrimaryAIDisease = (data, eyeKey) => {
-            const preds = data?.prediction_results?.[eyeKey];
-            if (!preds) return null;
-
-            const thresholds = (data?.prediction_thresholds && data.prediction_thresholds) || {};
-            let best = null;
-
-            Object.entries(preds).forEach(([diseaseKey, probValue]) => {
-              // Only consider diseases in our manual disease list
-              if (!diseaseKeys.includes(diseaseKey)) return;
-              
-              const threshold = typeof thresholds[diseaseKey] === 'number' ? thresholds[diseaseKey] : 0.5;
-              const prob = typeof probValue === 'number' ? probValue : 0;
-              const score = calculateScore(prob, threshold);
-
-              if (!best || score > best.score) {
-                best = { diseaseKey, score };
-              }
-            });
-
-            return best?.diseaseKey || null;
-          };
-
-          const buildInitialManualDiagnosis = (eyeKey) => {
-            const primaryDisease = getPrimaryAIDisease(result, eyeKey);
-            return diseaseKeys.reduce((acc, diseaseKey) => {
-              acc[diseaseKey] = primaryDisease === diseaseKey;
-              return acc;
-            }, {});
-          };
-
           const initialManualDiagnosis = {
             left_eye: buildInitialManualDiagnosis('left_eye'),
             right_eye: buildInitialManualDiagnosis('right_eye')
@@ -1116,46 +1260,6 @@ function App() {
       } catch (e) {
         console.warn('Failed to load manual diagnosis data:', e);
         // Even if loading fails, try to initialize with AI predictions
-        const diseaseKeys = Array.isArray(result?.diseases) && result.diseases.length > 0
-          ? result.diseases.map((entry) => entry.key)
-          : DEFAULT_DISEASE_ORDER;
-        
-        const calculateScore = (prob, threshold) => {
-          if (prob >= threshold * 2) return prob / (threshold * 2);
-          if (prob >= threshold) return 0.5 + (prob - threshold) / threshold * 0.3;
-          if (prob >= threshold * 0.5) return 0.2 + (prob - threshold * 0.5) / (threshold * 0.5) * 0.3;
-          return prob / (threshold * 0.5) * 0.2;
-        };
-        
-        const getPrimaryAIDisease = (data, eyeKey) => {
-          const preds = data?.prediction_results?.[eyeKey];
-          if (!preds) return null;
-
-          const thresholds = (data?.prediction_thresholds && data.prediction_thresholds) || {};
-          let best = null;
-
-          Object.entries(preds).forEach(([diseaseKey, probValue]) => {
-            if (!diseaseKeys.includes(diseaseKey)) return;
-            const threshold = typeof thresholds[diseaseKey] === 'number' ? thresholds[diseaseKey] : 0.5;
-            const prob = typeof probValue === 'number' ? probValue : 0;
-            const score = calculateScore(prob, threshold);
-
-            if (!best || score > best.score) {
-              best = { diseaseKey, score };
-            }
-          });
-
-          return best?.diseaseKey || null;
-        };
-
-        const buildInitialManualDiagnosis = (eyeKey) => {
-          const primaryDisease = getPrimaryAIDisease(result, eyeKey);
-          return diseaseKeys.reduce((acc, diseaseKey) => {
-            acc[diseaseKey] = primaryDisease === diseaseKey;
-            return acc;
-          }, {});
-        };
-
         const initialManualDiagnosis = {
           left_eye: buildInitialManualDiagnosis('left_eye'),
           right_eye: buildInitialManualDiagnosis('right_eye')
@@ -1176,11 +1280,13 @@ function App() {
 
   // 首次加载：取可用姓名列表
   useEffect(() => {
+    if (!maintenanceStatus.checked || maintenanceStatus.enabled) return;
     fetchAvailablePatientNames();
-  }, [fetchAvailablePatientNames]);
+  }, [fetchAvailablePatientNames, maintenanceStatus.checked, maintenanceStatus.enabled]);
 
   // 已有：根据 URL 初始化 ris_exam_id 与按姓名检索
   useEffect(() => {
+    if (!maintenanceStatus.checked || maintenanceStatus.enabled) return;
     const urlParams = new URLSearchParams(window.location.search);
     const risExamIdFromUrl = urlParams.get('ris_exam_id');
     const patientNameFromUrl = urlParams.get('patient_name');
@@ -1197,18 +1303,19 @@ function App() {
         fetchConsultationInfo(risExamIdFromUrl);
       }
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [fetchConsultationInfo, maintenanceStatus.checked, maintenanceStatus.enabled]);
 
   useEffect(() => {
+    if (!maintenanceStatus.checked || maintenanceStatus.enabled) return;
     if (!currentExamId || !activeModelId) return;
     fetchExamInstances(currentExamId);
-  }, [currentExamId, activeModelId, fetchExamInstances]);
+  }, [currentExamId, activeModelId, fetchExamInstances, maintenanceStatus.checked, maintenanceStatus.enabled]);
 
   useEffect(() => {
+    if (!maintenanceStatus.checked || maintenanceStatus.enabled) return;
     if (!currentExamId || !activeModelId) return;
     fetchPatientData(currentExamId, currentExamDate);
-  }, [currentExamId, currentExamDate, activeModelId, fetchPatientData]);
+  }, [currentExamId, currentExamDate, activeModelId, fetchPatientData, maintenanceStatus.checked, maintenanceStatus.enabled]);
 
   // 修正：根据索引选择特定问诊记录（使用 backendUrl，并同步可编辑副本）
   const selectConsultationByIndex = async (index, useRefined = true) => {
@@ -1337,6 +1444,7 @@ function App() {
 
   // Load LLM prompts config (update_prompt)
   useEffect(() => {
+    if (!maintenanceStatus.checked || maintenanceStatus.enabled) return;
     (async () => {
       try {
         const res = await fetch(`${backendUrl}/api/llm_config`, { cache: 'no-store' });
@@ -1344,10 +1452,11 @@ function App() {
       } catch {}
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [backendUrl]);
+  }, [backendUrl, maintenanceStatus.checked, maintenanceStatus.enabled]);
 
   // Auto-trigger LLM regeneration once per patient when chat is empty
   useEffect(() => {
+    if (maintenanceStatus.enabled) return;
     const pid = getCurrentPatientId();
     if (!pid) return;
 
@@ -1361,7 +1470,7 @@ function App() {
     }
     // 仅监听必要的状态，避免依赖未初始化的 const
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [patientData, llmLoading, sideChatMessages.length, getCurrentPatientId]);
+  }, [patientData, llmLoading, sideChatMessages.length, getCurrentPatientId, maintenanceStatus.enabled]);
   
 
   // Chat scroll handling (only autoscroll if user is at bottom)
@@ -1495,6 +1604,7 @@ function App() {
 
   // NEW: fetch LLM prompts/config once
   useEffect(() => {
+    if (!maintenanceStatus.checked || maintenanceStatus.enabled) return;
     (async () => {
       try {
         const res = await fetch(`${backendUrl}/api/llm_config`, { cache: 'no-store' });
@@ -1507,7 +1617,7 @@ function App() {
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [backendUrl]);
+  }, [backendUrl, maintenanceStatus.checked, maintenanceStatus.enabled]);
 
   const patientIdPrefix = "病例索引 (Case Index): ";
 
@@ -1569,9 +1679,6 @@ function App() {
     return depthMap;
   }, [diseaseHierarchyNodes]);
 
-  // Manual diagnosis diseases (decoupled from AI predictions)
-  const manualDiseaseInfo = MANUAL_DISEASE_INFO;
-
   const activeThresholdSetIndex = patientData?.active_threshold_set_index ?? patientData?.active_threshold_set ?? 0;
   const activeThresholdSetMeta = patientData?.threshold_sets?.[activeThresholdSetIndex];
   const activeThresholdSetLabel = activeThresholdSetMeta?.name || `阈值套装 ${activeThresholdSetIndex + 1}`;
@@ -1612,6 +1719,54 @@ function App() {
     return set;
   }, [diseaseInfo]);
 
+  const diseaseAliasMap = useMemo(() => {
+    return buildDiseaseAliasMap(patientData?.diseases, patientData?.disease_alias_map);
+  }, [patientData?.diseases, patientData?.disease_alias_map]);
+
+  const manualDiseaseInfo = useMemo(() => {
+    const mapped = {};
+    const entries = Array.isArray(patientData?.diseases) && patientData.diseases.length > 0
+      ? patientData.diseases
+      : Object.keys(MANUAL_DISEASE_INFO).map((key) => ({ key }));
+
+    entries.forEach((entry) => {
+      if (!entry?.key) return;
+      const defaults = MANUAL_DISEASE_INFO[entry.key] || diseaseInfo[entry.key] || {};
+      mapped[entry.key] = {
+        chinese: entry.label_cn || defaults.chinese || entry.key,
+        english: entry.label_en || defaults.english || entry.key,
+        fullName: entry.full_name || defaults.fullName || entry.label_cn || entry.label_en || entry.key,
+        shortName: entry.short_name || defaults.shortName || entry.key
+      };
+    });
+
+    return mapped;
+  }, [patientData?.diseases, diseaseInfo]);
+
+  const manualDiseaseOrder = useMemo(() => {
+    const base = diseaseOrder.length ? diseaseOrder : DEFAULT_DISEASE_ORDER;
+    const extras = Object.keys(manualDiseaseInfo).filter((key) => !base.includes(key));
+    return [...base, ...extras];
+  }, [diseaseOrder, manualDiseaseInfo]);
+
+  useEffect(() => {
+    if (!manualDiseaseOrder || manualDiseaseOrder.length === 0) return;
+    setManualDiagnosis((prev) => {
+      const ensureEyeData = (eyeKey) => {
+        const current = (prev && prev[eyeKey]) || {};
+        const next = {};
+        manualDiseaseOrder.forEach((key) => {
+          next[key] = current[key] ?? false;
+        });
+        return next;
+      };
+      return {
+        left_eye: ensureEyeData('left_eye'),
+        right_eye: ensureEyeData('right_eye'),
+      };
+    });
+  }, [manualDiseaseOrder]);
+
   // Map raw probability p (0-1) to visual width so that threshold t maps to 0.5
   // Linear piecewise: [0,t] -> [0,0.5], [t,1] -> [0.5,1]. This keeps monotonicity.
   const mapProbToWidth = (p, t) => {
@@ -1621,6 +1776,12 @@ function App() {
       return (p / (t * 2));
     }
     return 0.5 + (p - t) / (2 * (1 - t));
+  };
+
+  // Relative margin above/below threshold: 0 at threshold, negative below, positive above.
+  const marginScore = (p, t) => {
+    const tt = typeof t === 'number' && t > 0 ? t : 0.5;
+    return (p - tt) / Math.max(1 - tt, 1e-6);
   };
 
   const formatProb = (p) => (p === undefined || p === null ? '--' : p.toFixed(2));
@@ -1638,7 +1799,7 @@ function App() {
         sourceKey: dk,
         p,
         t,
-        score: mapProbToWidth(p, t),
+        score: marginScore(p, t),
       };
     });
 
@@ -1683,37 +1844,14 @@ function App() {
         : (item.p >= item.t * 1.2 ? '明显偏高' : (item.p >= item.t ? '较高' : (item.p >= item.t * 0.8 ? '接近阈值' : '较低')))
     });
 
-    const nonNormalRanked = ranked.filter((item) => !normalDiseaseKeys.has(item.key));
-    const positiveNonNormal = nonNormalRanked.filter((item) => item.p >= item.t);
-    const normalCandidate = ranked.find((item) => normalDiseaseKeys.has(item.key));
+    const primary = ranked[0];
+    if (!primary) return { primaries: [], secondaries: [] };
 
-    if (positiveNonNormal.length > 0) {
-      const primary = positiveNonNormal[0];
-      const secondaryPool = positiveNonNormal.slice(1);
-      const backupPool = nonNormalRanked.filter((item) => item.key !== primary.key);
-      const secondariesSource = secondaryPool.length > 0 ? secondaryPool : backupPool;
-      const secondaryItems = secondariesSource.slice(0, 2);
-      if (normalCandidate && !secondaryItems.some((item) => item.key === normalCandidate.key)) {
-        secondaryItems.push(normalCandidate);
-      }
-      return {
-        primaries: [enrich(primary)],
-        secondaries: secondaryItems.map(enrich)
-      };
-    }
+    const secondaries = ranked.filter((item) => item.key !== primary.key).slice(0, 3);
 
-    if (normalCandidate) {
-      return {
-        primaries: [enrich(normalCandidate)],
-        secondaries: nonNormalRanked.slice(0, 3).map(enrich)
-      };
-    }
-
-    const fallbackPrimary = nonNormalRanked[0] || ranked[0];
-    if (!fallbackPrimary) return { primaries: [], secondaries: [] };
     return {
-      primaries: [enrich(fallbackPrimary)],
-      secondaries: nonNormalRanked.filter((item) => item.key !== fallbackPrimary.key).slice(0, 2).map(enrich)
+      primaries: [enrich(primary)],
+      secondaries: secondaries.map(enrich)
     };
   };
 
@@ -2001,7 +2139,25 @@ function App() {
   //     setTimeout(() => setConsultationSubmitMessage(''), 3000);
   //   }
   // }, [backendUrl, currentExamId, consultationDataEdited]);
-  
+
+  if (!maintenanceStatus.checked) {
+    return (
+      <MaintenanceScreen
+        message="正在检查系统状态，请稍候..."
+        onRetry={refreshMaintenanceStatus}
+      />
+    );
+  }
+
+  if (maintenanceStatus.enabled) {
+    return (
+      <MaintenanceScreen
+        message={maintenanceStatus.message || maintenanceFallbackMessage}
+        onRetry={refreshMaintenanceStatus}
+      />
+    );
+  }
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-100 to-purple-100 p-6 font-inter text-gray-800 antialiased">
       {/* Header */}
@@ -2573,19 +2729,22 @@ function App() {
                   <div className="border border-gray-200 rounded-lg p-4 bg-green-50">
                     <h5 className="font-medium text-gray-700 mb-3 text-center">右眼 (Right Eye)</h5>
                     <div className="space-y-2">
-                      {Object.entries(manualDiseaseInfo).map(([disease, info]) => (
-                        <label key={disease} className="flex items-center space-x-2">
-                          <input
-                            type="checkbox"
-                            checked={(manualDiagnosis?.right_eye?.[disease]) || false}
-                            onChange={() => handleManualDiagnosisToggle('right_eye', disease)}
-                            className="form-checkbox h-4 w-4 text-green-600"
-                          />
-                          <span className="text-sm">
-                            {info.chinese} / {info.english}
-                          </span>
-                        </label>
-                      ))}
+                      {manualDiseaseOrder.map((disease) => {
+                        const info = manualDiseaseInfo[disease] || { chinese: disease, english: disease };
+                        return (
+                          <label key={disease} className="flex items-center space-x-2">
+                            <input
+                              type="checkbox"
+                              checked={(manualDiagnosis?.right_eye?.[disease]) || false}
+                              onChange={() => handleManualDiagnosisToggle('right_eye', disease)}
+                              className="form-checkbox h-4 w-4 text-green-600"
+                            />
+                            <span className="text-sm">
+                              {info.chinese} / {info.english}
+                            </span>
+                          </label>
+                        );
+                      })}
                       
                       <div className="mt-3">
                         <label className="block text-xs font-medium text-gray-700 mb-1">
@@ -2606,19 +2765,22 @@ function App() {
                   <div className="border border-gray-200 rounded-lg p-4 bg-blue-50">
                     <h5 className="font-medium text-gray-700 mb-3 text-center">左眼 (Left Eye)</h5>
                     <div className="space-y-2">
-                      {Object.entries(manualDiseaseInfo).map(([disease, info]) => (
-                        <label key={disease} className="flex items-center space-x-2">
-                          <input
-                            type="checkbox"
-                            checked={(manualDiagnosis?.left_eye?.[disease]) || false}
-                            onChange={() => handleManualDiagnosisToggle('left_eye', disease)}
-                            className="form-checkbox h-4 w-4 text-blue-600"
-                          />
-                          <span className="text-sm">
-                            {info.chinese} / {info.english}
-                          </span>
-                        </label>
-                      ))}
+                      {manualDiseaseOrder.map((disease) => {
+                        const info = manualDiseaseInfo[disease] || { chinese: disease, english: disease };
+                        return (
+                          <label key={disease} className="flex items-center space-x-2">
+                            <input
+                              type="checkbox"
+                              checked={(manualDiagnosis?.left_eye?.[disease]) || false}
+                              onChange={() => handleManualDiagnosisToggle('left_eye', disease)}
+                              className="form-checkbox h-4 w-4 text-blue-600"
+                            />
+                            <span className="text-sm">
+                              {info.chinese} / {info.english}
+                            </span>
+                          </label>
+                        );
+                      })}
                       
                       <div className="mt-3">
                         <label className="block text-xs font-medium text-gray-700 mb-1">

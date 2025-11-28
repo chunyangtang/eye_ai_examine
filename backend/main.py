@@ -12,9 +12,9 @@ from pydantic import BaseModel
 from pathlib import Path
 
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from contextlib import asynccontextmanager
 
 from datatype import ImageInfo, PatientData, SubmitDiagnosisRequest, ManualDiagnosisData, UpdateSelectionRequest, AlterThresholdRequest, CustomDiseases
@@ -28,6 +28,20 @@ logger = logging.getLogger(__name__)
 
 
 load_dotenv()
+
+MAINTENANCE_CONFIG = {
+    # Toggle maintenance mode without touching other runtime code paths
+    "enabled": os.getenv("MAINTENANCE_MODE", "false").lower() == "true",
+    "message": os.getenv("MAINTENANCE_MESSAGE", "系统维护中，请稍后再试。"),
+    # Keep essential paths reachable so status checks and docs still load
+    "allow_paths": {
+        "/api/maintenance",
+        "/api/monitor_status",
+        "/docs",
+        "/openapi.json",
+        "/redoc",
+    },
+}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -49,6 +63,23 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def maintenance_guard(request: Request, call_next):
+    """Return a friendly 503 when maintenance mode is enabled."""
+    if MAINTENANCE_CONFIG.get("enabled"):
+        path = request.url.path.rstrip("/") or "/"
+        if path not in MAINTENANCE_CONFIG.get("allow_paths", set()):
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "status": "maintenance",
+                    "message": MAINTENANCE_CONFIG.get("message", "Service under maintenance."),
+                },
+            )
+    return await call_next(request)
+
 
 # Get data paths from environment variables (must be defined before functions that use them)
 RAW_JSON_ROOT_ENV = os.getenv("RAW_JSON_PATH", "../data")
@@ -191,6 +222,21 @@ DEFAULT_DISEASES = [
 
 DEFAULT_DISEASE_META = {entry["key"]: entry for entry in DEFAULT_DISEASES}
 
+CROSS_DISEASE_ALIAS_GROUPS = [
+    ["青光眼", "Glaucoma"],
+    ["糖网", "糖尿病性视网膜病变", "糖尿病视网膜病变", "Diabetic Retinopathy", "DR"],
+    ["AMD", "年龄相关性黄斑变性", "Age-related Macular Degeneration"],
+    ["病理性近视", "高度近视", "Pathological Myopia", "Pathologic Myopia", "PM"],
+    ["RVO", "视网膜静脉阻塞", "视网膜静脉阻塞（RVO）", "Retinal Vein Occlusion"],
+    ["RAO", "视网膜动脉阻塞", "视网膜动脉阻塞（RAO）", "Retinal Artery Occlusion"],
+    ["视网膜脱离", "视网膜脱离（RD）", "Retinal Detachment", "RD"],
+    ["其它视网膜病", "其他视网膜病", "Other Retinal Diseases", "Other Retinal"],
+    ["其它黄斑病变", "其他黄斑病变", "Other Macular Diseases", "Other Macular"],
+    ["其它眼底病变", "其他眼底病变", "Other Fundus Diseases", "Other Fundus"],
+    ["白内障", "Cataract"],
+    ["正常", "Normal", "Healthy"],
+]
+
 DEFAULT_THRESHOLD_SETS = [
     {
         "id": "set_1",
@@ -271,13 +317,34 @@ def _normalize_diseases(raw_diseases: Optional[List[Any]]) -> Tuple[List[Dict[st
         entry.setdefault("category", defaults.get("category", "other"))
         entry.setdefault("color", defaults.get("color", "text-gray-600"))
 
-        aliases = entry.get("aliases") or defaults.get("aliases") or []
+        aliases = []
+        if defaults.get("aliases"):
+            aliases.extend(defaults["aliases"])
+        if entry.get("aliases"):
+            if isinstance(entry["aliases"], list):
+                aliases.extend(entry["aliases"])
+            else:
+                aliases.append(entry["aliases"])
         if isinstance(aliases, str):
             aliases = [aliases]
         aliases = [a for a in aliases if isinstance(a, str)]
-        if key not in aliases:
-            aliases.append(key)
-        entry["aliases"] = aliases
+
+        # Expand aliases with cross-language/common mappings so different models align.
+        for group in CROSS_DISEASE_ALIAS_GROUPS:
+            if key in group or any(a in group for a in aliases):
+                aliases.extend(group)
+
+        # Ensure key is included and remove duplicates while preserving order.
+        seen = set()
+        normalized_aliases = []
+        for alias in aliases + [key]:
+            if not isinstance(alias, str):
+                continue
+            if alias in seen:
+                continue
+            seen.add(alias)
+            normalized_aliases.append(alias)
+        entry["aliases"] = normalized_aliases
 
         if "is_normal" in entry:
             entry["is_normal"] = bool(entry["is_normal"])
@@ -1078,6 +1145,16 @@ async def list_inference_models():
         "models": models_payload,
     }
 
+
+@app.get("/api/maintenance")
+async def get_maintenance_status():
+    """Expose maintenance toggle to the frontend."""
+    return {
+        "enabled": bool(MAINTENANCE_CONFIG.get("enabled")),
+        "message": MAINTENANCE_CONFIG.get("message", "系统维护中，请稍后再试。"),
+    }
+
+
 @app.post("/api/reload_data")
 async def reload_data_manually(model_id: Optional[str] = None):
     """Manually trigger a reload of inference data from disk."""
@@ -1187,17 +1264,29 @@ async def submit_diagnosis(request: SubmitDiagnosisRequest):
         if not exam_date:
             exam_date = datetime.datetime.now().strftime("%Y%m%d")
             logger.warning(f"No exam_date found, using today: {exam_date}")
+
+        disease_keys = [entry.get("key") for entry in getattr(patient, "diseases", []) if isinstance(entry, dict) and entry.get("key")]
+        disease_key_set = set(disease_keys)
+        alias_map = getattr(patient, "disease_alias_map", {}) or MODEL_CONFIGS.get(resolved_model_id, {}).get("disease_alias_map", {})
         
         # Store manual diagnosis data
         if request.manual_diagnosis or request.custom_diseases or request.diagnosis_notes:
             # Convert raw dict to ManualEyeDiagnosis objects
             processed_manual_diagnosis = {}
             if request.manual_diagnosis:
-                from datatype import ManualEyeDiagnosis
+                lower_alias_map = {str(k).lower(): v for k, v in (alias_map or {}).items()}
                 for eye_key, eye_data in request.manual_diagnosis.items():
                     if isinstance(eye_data, dict):
-                        # Create ManualEyeDiagnosis from dict, filling missing fields with False
-                        processed_manual_diagnosis[eye_key] = ManualEyeDiagnosis(**eye_data)
+                        normalized_eye: Dict[str, bool] = {}
+                        for raw_key, raw_val in eye_data.items():
+                            canonical = (alias_map or {}).get(raw_key) or lower_alias_map.get(str(raw_key).lower(), raw_key)
+                            if canonical and canonical not in disease_key_set:
+                                disease_key_set.add(canonical)
+                                disease_keys.append(canonical)
+                            normalized_eye[canonical] = bool(raw_val)
+                        for dk in disease_keys:
+                            normalized_eye.setdefault(dk, False)
+                        processed_manual_diagnosis[eye_key] = normalized_eye
                     else:
                         processed_manual_diagnosis[eye_key] = eye_data
             

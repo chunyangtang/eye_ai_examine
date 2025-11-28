@@ -32,7 +32,7 @@ class CustomDiseases(BaseModel):
     right_eye: str = ""
 
 class ManualDiagnosisData(BaseModel):
-    manual_diagnosis: Dict[str, ManualEyeDiagnosis]  # 'left_eye', 'right_eye'
+    manual_diagnosis: Dict[str, Dict[str, bool]]  # 'left_eye', 'right_eye'
     custom_diseases: CustomDiseases
     diagnosis_notes: str = ""
 
@@ -52,6 +52,7 @@ class PatientData(BaseModel):
     model_id: Optional[str] = None
     model_name: Optional[str] = None
     diseases: List[Dict[str, Any]] = []
+    disease_alias_map: Dict[str, str] = {}
 
 class SubmitDiagnosisRequest(BaseModel):
     patient_id: str
