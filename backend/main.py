@@ -613,17 +613,24 @@ def _preload_manual_diagnoses() -> None:
             cache_key = f"{patient_id}_{exam_date}"
             
             try:
-                manual_diagnosis_storage[cache_key] = ManualDiagnosisData(**payload)
+                stored = ManualDiagnosisData(**payload)
+                if getattr(stored, "manual_descriptions", None) is None:
+                    stored.manual_descriptions = {"left_eye": "", "right_eye": ""}
+                manual_diagnosis_storage[cache_key] = stored
                 logger.debug(f"Loaded manual diagnosis for {cache_key}")
             except Exception:
                 try:
                     from datatype import CustomDiseases
-                    manual_diagnosis_storage[cache_key] = ManualDiagnosisData(
+                    stored = ManualDiagnosisData(
                         manual_diagnosis=payload.get("manual_diagnosis", {}),
                         custom_diseases=payload.get("custom_diseases") or CustomDiseases(),
                         diagnosis_notes=payload.get("diagnosis_notes", ""),
-                        doctor_id=payload.get("doctor_id")
+                        doctor_id=payload.get("doctor_id"),
+                        manual_descriptions=payload.get("manual_descriptions")
                     )
+                    if getattr(stored, "manual_descriptions", None) is None:
+                        stored.manual_descriptions = {"left_eye": "", "right_eye": ""}
+                    manual_diagnosis_storage[cache_key] = stored
                     logger.debug(f"Loaded manual diagnosis for {cache_key} (with fallback)")
                 except Exception as inner_exc:
                     logger.error("Failed to deserialize manual diagnosis for %s: %s", cache_key, inner_exc)
@@ -1271,7 +1278,7 @@ async def submit_diagnosis(request: SubmitDiagnosisRequest):
         alias_map = getattr(patient, "disease_alias_map", {}) or MODEL_CONFIGS.get(resolved_model_id, {}).get("disease_alias_map", {})
         
         # Store manual diagnosis data
-        if request.manual_diagnosis or request.custom_diseases or request.diagnosis_notes:
+        if request.manual_diagnosis or request.custom_diseases or request.diagnosis_notes or request.manual_descriptions:
             # Convert raw dict to ManualEyeDiagnosis objects
             processed_manual_diagnosis = {}
             if request.manual_diagnosis:
@@ -1295,7 +1302,11 @@ async def submit_diagnosis(request: SubmitDiagnosisRequest):
                 manual_diagnosis=processed_manual_diagnosis,
                 custom_diseases=request.custom_diseases or CustomDiseases(),
                 diagnosis_notes=request.diagnosis_notes or "",
-                doctor_id=request.doctor_id
+                doctor_id=request.doctor_id,
+                manual_descriptions=request.manual_descriptions or {
+                    "left_eye": "",
+                    "right_eye": ""
+                }
             )
             
             # Store in memory with composite key
@@ -1312,7 +1323,8 @@ async def submit_diagnosis(request: SubmitDiagnosisRequest):
                         "manual_diagnosis": manual_data.manual_diagnosis,
                         "custom_diseases": getattr(manual_data, "custom_diseases", {}),
                         "diagnosis_notes": getattr(manual_data, "diagnosis_notes", ""),
-                        "doctor_id": getattr(manual_data, "doctor_id", None)
+                        "doctor_id": getattr(manual_data, "doctor_id", None),
+                        "manual_descriptions": getattr(manual_data, "manual_descriptions", {})
                     }
                 
                 # Ensure patient_id entry exists
@@ -1498,11 +1510,15 @@ async def get_manual_diagnosis(ris_exam_id: str, exam_date: Optional[str] = None
             cache_key = f"{ris_exam_id}_{exam_date}"
             manual_data = manual_diagnosis_storage.get(cache_key)
             if manual_data:
+                if getattr(manual_data, "manual_descriptions", None) is None:
+                    manual_data.manual_descriptions = {"left_eye": "", "right_eye": ""}
                 return manual_data
         
         # Try without exam_date (backward compatibility)
         manual_data = manual_diagnosis_storage.get(ris_exam_id)
         if manual_data:
+            if getattr(manual_data, "manual_descriptions", None) is None:
+                manual_data.manual_descriptions = {"left_eye": "", "right_eye": ""}
             return manual_data
         
         # If no exam_date provided, try to find any exam for this patient
@@ -1511,6 +1527,8 @@ async def get_manual_diagnosis(ris_exam_id: str, exam_date: Optional[str] = None
             for key, data in manual_diagnosis_storage.items():
                 if key.startswith(f"{ris_exam_id}_"):
                     logger.info(f"Found manual diagnosis for {key}")
+                    if getattr(data, "manual_descriptions", None) is None:
+                        data.manual_descriptions = {"left_eye": "", "right_eye": ""}
                     return data
         
         # Return empty structure if no manual diagnosis exists yet
@@ -1519,7 +1537,8 @@ async def get_manual_diagnosis(ris_exam_id: str, exam_date: Optional[str] = None
             manual_diagnosis={},
             custom_diseases=CustomDiseases(),
             diagnosis_notes="",
-            doctor_id=None
+            doctor_id=None,
+            manual_descriptions={"left_eye": "", "right_eye": ""}
         )
 
 @app.get("/api/manual_diagnoses")

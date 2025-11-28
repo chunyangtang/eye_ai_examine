@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { MANUAL_DISEASE_INFO, MANUAL_DISEASE_ORDER, MANUAL_COMMON_PHRASES, MANUAL_PHRASE_ALIASES } from './manualDiagnosisConfig';
 
 const renderMarkdownContent = (content) => {
   if (!content) return '';
@@ -341,81 +342,6 @@ const DEFAULT_DISEASE_INFO = {
 const DEFAULT_DISEASE_ORDER = [
   '青光眼','糖网','AMD','病理性近视','RVO','RAO','视网膜脱离','其它视网膜病','其它黄斑病变','白内障','正常'
 ];
-
-const MANUAL_DISEASE_INFO = {
-  青光眼: {
-    chinese: '青光眼',
-    english: 'Glaucoma',
-    fullName: '青光眼 (Glaucoma)',
-    shortName: 'Glaucoma'
-  },
-  糖网: {
-    chinese: '糖网',
-    english: 'Diabetic Retinopathy',
-    fullName: '糖网 (Diabetic Retinopathy)',
-    shortName: 'DR'
-  },
-  AMD: {
-    chinese: '年龄相关性黄斑变性',
-    english: 'Age-related Macular Degeneration',
-    fullName: '年龄相关性黄斑变性 (Age-related Macular Degeneration)',
-    shortName: 'AMD'
-  },
-  病理性近视: {
-    chinese: '病理性近视',
-    english: 'Pathological Myopia',
-    fullName: '病理性近视 (Pathological Myopia)',
-    shortName: 'PM'
-  },
-  高度近视: {
-    chinese: '高度近视',
-    english: 'High Myopia',
-    fullName: '高度近视 (High Myopia)',
-    shortName: 'High Myopia'
-  },
-  RVO: {
-    chinese: '视网膜静脉阻塞',
-    english: 'Retinal Vein Occlusion',
-    fullName: '视网膜静脉阻塞 (RVO)',
-    shortName: 'RVO'
-  },
-  RAO: {
-    chinese: '视网膜动脉阻塞',
-    english: 'Retinal Artery Occlusion',
-    fullName: '视网膜动脉阻塞 (RAO)',
-    shortName: 'RAO'
-  },
-  视网膜脱离: {
-    chinese: '视网膜脱离',
-    english: 'Retinal Detachment',
-    fullName: '视网膜脱离 (Retinal Detachment)',
-    shortName: 'RD'
-  },
-  其它视网膜病: {
-    chinese: '其它视网膜病',
-    english: 'Other Retinal Diseases',
-    fullName: '其它视网膜病 (Other Retinal)',
-    shortName: 'Other Retinal'
-  },
-  其它黄斑病变: {
-    chinese: '其它黄斑病变',
-    english: 'Other Macular Diseases',
-    fullName: '其它黄斑病变 (Other Macular)',
-    shortName: 'Other Macular'
-  },
-  白内障: {
-    chinese: '白内障',
-    english: 'Cataract',
-    fullName: '白内障 (Cataract)',
-    shortName: 'Cataract'
-  },
-  正常: {
-    chinese: '正常',
-    english: 'Normal',
-    fullName: '正常 (Normal)',
-    shortName: 'Normal'
-  }
-};
 
 const CROSS_DISEASE_ALIAS_GROUPS = [
   ['青光眼', 'Glaucoma'],
@@ -841,6 +767,10 @@ function App() {
     left_eye: {},
     right_eye: {}
   });
+  const [manualDescriptions, setManualDescriptions] = useState({
+    left_eye: '',
+    right_eye: ''
+  });
   const [customDiseases, setCustomDiseases] = useState({
     left_eye: '',
     right_eye: ''
@@ -1174,6 +1104,7 @@ function App() {
       const diseaseKeys = Array.isArray(normalizedResult?.diseases) && normalizedResult.diseases.length > 0
         ? normalizedResult.diseases.map((entry) => entry.key)
         : DEFAULT_DISEASE_ORDER;
+      const manualDiseaseKeys = MANUAL_DISEASE_ORDER.length ? MANUAL_DISEASE_ORDER : diseaseKeys;
 
       const calculateScore = (prob, threshold) => {
         const t = typeof threshold === 'number' && threshold > 0 ? threshold : 0.5;
@@ -1205,7 +1136,7 @@ function App() {
 
       const buildInitialManualDiagnosis = (eyeKey) => {
         const primaryDisease = getPrimaryAIDisease(normalizedResult, eyeKey);
-        return diseaseKeys.reduce((acc, diseaseKey) => {
+        return manualDiseaseKeys.reduce((acc, diseaseKey) => {
           acc[diseaseKey] = primaryDisease === diseaseKey;
           return acc;
         }, {});
@@ -1213,38 +1144,56 @@ function App() {
 
       // Load manual diagnosis data if available, otherwise initialize with AI predictions
       try {
+        setManualDescriptions({ left_eye: '', right_eye: '' });
         const manualUrl = currentExamDate 
           ? `${backendUrl}/api/manual_diagnosis/${examId}?exam_date=${encodeURIComponent(currentExamDate)}`
           : `${backendUrl}/api/manual_diagnosis/${examId}`;
         const manualResp = await fetch(manualUrl);
         let manualDataLoaded = false;
         
-        if (manualResp.ok) {
-          const manualData = await manualResp.json();
-          
-          // Check if manual_diagnosis exists AND has actual data (not just empty objects)
-          const hasManualDiagnosisData = manualData.manual_diagnosis && (
-            (manualData.manual_diagnosis.left_eye && Object.keys(manualData.manual_diagnosis.left_eye).length > 0) ||
-            (manualData.manual_diagnosis.right_eye && Object.keys(manualData.manual_diagnosis.right_eye).length > 0)
-          );
-          
-          if (hasManualDiagnosisData) {
-            // Ensure the structure has left_eye and right_eye objects
-            const normalizedManual = normalizeManualDiagnosis(
+          if (manualResp.ok) {
+            const manualData = await manualResp.json();
+
+            const hasManualDiagnosisData = manualData.manual_diagnosis && (
+              (manualData.manual_diagnosis.left_eye && Object.keys(manualData.manual_diagnosis.left_eye).length > 0) ||
+              (manualData.manual_diagnosis.right_eye && Object.keys(manualData.manual_diagnosis.right_eye).length > 0)
+            );
+            const hasManualDescriptions = !!(manualData.manual_descriptions && (
+              (manualData.manual_descriptions.left_eye || '').trim() ||
+              (manualData.manual_descriptions.right_eye || '').trim()
+            ));
+            const hasCustom = !!(manualData.custom_diseases && (
+              (manualData.custom_diseases.left_eye || '').trim() ||
+              (manualData.custom_diseases.right_eye || '').trim()
+            ));
+            const hasNotes = !!(manualData.diagnosis_notes && manualData.diagnosis_notes.trim());
+            
+            if (hasManualDiagnosisData) {
+              // Ensure the structure has left_eye and right_eye objects
+              const normalizedManual = normalizeManualDiagnosis(
               manualData.manual_diagnosis,
-              diseaseKeys,
+              manualDiseaseKeys,
               diseaseAliasMap
             );
-            setManualDiagnosis(normalizedManual);
-            manualDataLoaded = true;
+              setManualDiagnosis(normalizedManual);
+              manualDataLoaded = true;
+            }
+            if (manualData.custom_diseases) {
+              setCustomDiseases(manualData.custom_diseases);
+              manualDataLoaded = manualDataLoaded || hasCustom;
+            }
+            if (manualData.diagnosis_notes !== undefined) {
+              setDiagnosisNotes(manualData.diagnosis_notes || '');
+              manualDataLoaded = manualDataLoaded || hasNotes;
+            }
+            if (manualData.manual_descriptions) {
+              setManualDescriptions({
+                left_eye: manualData.manual_descriptions.left_eye || '',
+                right_eye: manualData.manual_descriptions.right_eye || ''
+              });
+              manualDataLoaded = manualDataLoaded || hasManualDescriptions;
+            }
           }
-          if (manualData.custom_diseases) {
-            setCustomDiseases(manualData.custom_diseases);
-          }
-          if (manualData.diagnosis_notes) {
-            setDiagnosisNotes(manualData.diagnosis_notes);
-          }
-        }
         
         // If no saved manual diagnosis exists, initialize with AI predictions
         if (!manualDataLoaded) {
@@ -1257,6 +1206,7 @@ function App() {
           setManualDiagnosis(initialManualDiagnosis);
           setCustomDiseases({ left_eye: '', right_eye: '' });
           setDiagnosisNotes('');
+          setManualDescriptions({ left_eye: '', right_eye: '' });
         }
       } catch (e) {
         console.warn('Failed to load manual diagnosis data:', e);
@@ -1270,6 +1220,7 @@ function App() {
         setManualDiagnosis(initialManualDiagnosis);
         setCustomDiseases({ left_eye: '', right_eye: '' });
         setDiagnosisNotes('');
+        setManualDescriptions({ left_eye: '', right_eye: '' });
       }
 
     } catch (error) {
@@ -1726,29 +1677,22 @@ function App() {
 
   const manualDiseaseInfo = useMemo(() => {
     const mapped = {};
-    const entries = Array.isArray(patientData?.diseases) && patientData.diseases.length > 0
-      ? patientData.diseases
-      : Object.keys(MANUAL_DISEASE_INFO).map((key) => ({ key }));
-
-    entries.forEach((entry) => {
-      if (!entry?.key) return;
-      const defaults = MANUAL_DISEASE_INFO[entry.key] || diseaseInfo[entry.key] || {};
-      mapped[entry.key] = {
-        chinese: entry.label_cn || defaults.chinese || entry.key,
-        english: entry.label_en || defaults.english || entry.key,
-        fullName: entry.full_name || defaults.fullName || entry.label_cn || entry.label_en || entry.key,
-        shortName: entry.short_name || defaults.shortName || entry.key
+    MANUAL_DISEASE_ORDER.forEach((key) => {
+      const entry = MANUAL_DISEASE_INFO[key] || {};
+      const defaults = diseaseInfo[key] || {};
+      mapped[key] = {
+        chinese: entry.chinese || defaults.chinese || key,
+        english: entry.english || defaults.english || key,
+        fullName: entry.fullName || defaults.fullName || entry.label_cn || entry.label_en || key,
+        shortName: entry.shortName || defaults.shortName || key,
       };
     });
-
     return mapped;
-  }, [patientData?.diseases, diseaseInfo]);
+  }, [diseaseInfo]);
 
   const manualDiseaseOrder = useMemo(() => {
-    const base = diseaseOrder.length ? diseaseOrder : DEFAULT_DISEASE_ORDER;
-    const extras = Object.keys(manualDiseaseInfo).filter((key) => !base.includes(key));
-    return [...base, ...extras];
-  }, [diseaseOrder, manualDiseaseInfo]);
+    return MANUAL_DISEASE_ORDER.length ? MANUAL_DISEASE_ORDER : (diseaseOrder.length ? diseaseOrder : DEFAULT_DISEASE_ORDER);
+  }, [diseaseOrder]);
 
   useEffect(() => {
     if (!manualDiseaseOrder || manualDiseaseOrder.length === 0) return;
@@ -1895,6 +1839,86 @@ function App() {
     setHasUnsavedChanges(true);
   };
 
+  const handleManualDescriptionChange = (eye, value) => {
+    setManualDescriptions(prev => ({
+      ...prev,
+      [eye]: value
+    }));
+    setHasUnsavedChanges(true);
+  };
+
+  const phraseSeparator = MANUAL_COMMON_PHRASES.separator || MANUAL_COMMON_PHRASES.seperator || ', ';
+  const manualPhraseMap = MANUAL_COMMON_PHRASES.common_phrases || {};
+
+  const resolvePhraseKey = useCallback((diseaseKey) => {
+    if (!diseaseKey) return diseaseKey;
+    if (MANUAL_PHRASE_ALIASES[diseaseKey]) return MANUAL_PHRASE_ALIASES[diseaseKey];
+    const shortName = manualDiseaseInfo[diseaseKey]?.shortName;
+    if (shortName && MANUAL_PHRASE_ALIASES[shortName]) return MANUAL_PHRASE_ALIASES[shortName];
+    return diseaseKey;
+  }, [manualDiseaseInfo]);
+
+  const getSelectedDiseasesForEye = useCallback((eyeKey) => {
+    return Object.entries(manualDiagnosis?.[eyeKey] || {})
+      .filter(([, val]) => !!val)
+      .map(([key]) => key);
+  }, [manualDiagnosis]);
+
+  const getPhraseGroupsForDisease = useCallback((diseaseKey) => {
+    const resolved = resolvePhraseKey(diseaseKey);
+    return manualPhraseMap[resolved] || manualPhraseMap[diseaseKey] || [];
+  }, [manualPhraseMap, resolvePhraseKey]);
+
+  const appendPhraseToDescription = (eye, phrase) => {
+    if (!phrase) return;
+    setManualDescriptions(prev => {
+      const current = (prev && prev[eye]) || '';
+      const trimmed = current.trim();
+      const prefix = trimmed ? `${trimmed}${phraseSeparator}` : '';
+      return {
+        ...prev,
+        [eye]: `${prefix}${phrase}`
+      };
+    });
+    setHasUnsavedChanges(true);
+  };
+
+  const renderPhraseChooser = (eyeKey) => {
+    const selected = getSelectedDiseasesForEye(eyeKey);
+    if (!selected || selected.length === 0) return null;
+
+    return (
+      <div className="mt-2 space-y-2">
+        {selected.map((disease) => {
+          const phraseGroups = getPhraseGroupsForDisease(disease);
+          if (!phraseGroups || phraseGroups.length === 0) return null;
+          const info = manualDiseaseInfo[disease] || {};
+          return (
+            <div key={`${eyeKey}-${disease}`} className="border border-dashed border-gray-300 rounded-md p-2 bg-white/70">
+              <div className="text-xs font-semibold text-gray-700 mb-1">
+                {(info.chinese || disease)} 描述短语
+              </div>
+              {phraseGroups.map((group, idx) => (
+                <div key={`${disease}-group-${idx}`} className="flex flex-wrap gap-2 mb-1">
+                  {group.map((phrase) => (
+                    <button
+                      type="button"
+                      key={phrase}
+                      onClick={() => appendPhraseToDescription(eyeKey, phrase)}
+                      className="px-2 py-1 text-xs rounded border border-gray-200 bg-gray-50 hover:bg-blue-50 hover:border-blue-300 transition"
+                    >
+                      {phrase}
+                    </button>
+                  ))}
+                </div>
+              ))}
+            </div>
+          );
+        })}
+      </div>
+    );
+  };
+
   const handleReselectImages = async (newSelectedIds) => {
     const normalizedSelections = Array.isArray(newSelectedIds) ? [...newSelectedIds] : [];
     while (normalizedSelections.length < 4) {
@@ -1992,14 +2016,16 @@ function App() {
     const manualDiagnosisPayload = {
       manual_diagnosis: manualDiagnosis,
       custom_diseases: customDiseases,
-      diagnosis_notes: diagnosisNotes
+      diagnosis_notes: diagnosisNotes,
+      manual_descriptions: manualDescriptions
     };
 
     // Check if there's manual diagnosis data or image updates to submit
     const hasManualDiagnosisData = Object.values(manualDiagnosis.left_eye).some(Boolean) || 
                                    Object.values(manualDiagnosis.right_eye).some(Boolean) ||
                                    customDiseases.left_eye || customDiseases.right_eye || 
-                                   diagnosisNotes.trim();
+                                   diagnosisNotes.trim() ||
+                                   manualDescriptions.left_eye.trim() || manualDescriptions.right_eye.trim();
 
     if (imageUpdates.length === 0 && !hasManualDiagnosisData) {
         setSubmitMessage("No changes to submit.");
@@ -2760,6 +2786,20 @@ function App() {
                           className="w-full px-2 py-1 border border-gray-300 rounded-md text-xs focus:outline-none focus:ring-1 focus:ring-green-500"
                         />
                       </div>
+
+                      <div className="mt-3">
+                        <label className="block text-xs font-medium text-gray-700 mb-1">
+                          右眼描述 (Right Eye Description):
+                        </label>
+                        <textarea
+                          value={manualDescriptions?.right_eye || ''}
+                          onChange={(e) => handleManualDescriptionChange('right_eye', e.target.value)}
+                          placeholder="输入或点击下方短语自动补充 / Type or click phrases to append"
+                          rows={3}
+                          className="w-full px-2 py-1 border border-gray-300 rounded-md text-xs focus:outline-none focus:ring-1 focus:ring-green-500 resize-y"
+                        />
+                        {renderPhraseChooser('right_eye')}
+                      </div>
                     </div>
                   </div>
                   
@@ -2795,6 +2835,20 @@ function App() {
                           placeholder="输入其他疾病 / Enter custom disease"
                           className="w-full px-2 py-1 border border-gray-300 rounded-md text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
                         />
+                      </div>
+
+                      <div className="mt-3">
+                        <label className="block text-xs font-medium text-gray-700 mb-1">
+                          左眼描述 (Left Eye Description):
+                        </label>
+                        <textarea
+                          value={manualDescriptions?.left_eye || ''}
+                          onChange={(e) => handleManualDescriptionChange('left_eye', e.target.value)}
+                          placeholder="输入或点击下方短语自动补充 / Type or click phrases to append"
+                          rows={3}
+                          className="w-full px-2 py-1 border border-gray-300 rounded-md text-xs focus:outline-none focus:ring-1 focus:ring-blue-500 resize-y"
+                        />
+                        {renderPhraseChooser('left_eye')}
                       </div>
                     </div>
                   </div>

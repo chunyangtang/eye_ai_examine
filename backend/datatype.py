@@ -36,6 +36,7 @@ class ManualDiagnosisData(BaseModel):
     custom_diseases: CustomDiseases
     diagnosis_notes: str = ""
     doctor_id: Optional[str] = None
+    manual_descriptions: Optional[Dict[str, str]] = None
 
 
 class PatientData(BaseModel):
@@ -64,6 +65,7 @@ class SubmitDiagnosisRequest(BaseModel):
     custom_diseases: Optional[CustomDiseases] = None
     diagnosis_notes: str = ""
     doctor_id: Optional[str] = None
+    manual_descriptions: Optional[Dict[str, str]] = None
     model_id: Optional[str] = None
     
 
