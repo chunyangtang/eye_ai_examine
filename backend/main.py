@@ -621,7 +621,8 @@ def _preload_manual_diagnoses() -> None:
                     manual_diagnosis_storage[cache_key] = ManualDiagnosisData(
                         manual_diagnosis=payload.get("manual_diagnosis", {}),
                         custom_diseases=payload.get("custom_diseases") or CustomDiseases(),
-                        diagnosis_notes=payload.get("diagnosis_notes", "")
+                        diagnosis_notes=payload.get("diagnosis_notes", ""),
+                        doctor_id=payload.get("doctor_id")
                     )
                     logger.debug(f"Loaded manual diagnosis for {cache_key} (with fallback)")
                 except Exception as inner_exc:
@@ -1293,7 +1294,8 @@ async def submit_diagnosis(request: SubmitDiagnosisRequest):
             manual_data = ManualDiagnosisData(
                 manual_diagnosis=processed_manual_diagnosis,
                 custom_diseases=request.custom_diseases or CustomDiseases(),
-                diagnosis_notes=request.diagnosis_notes or ""
+                diagnosis_notes=request.diagnosis_notes or "",
+                doctor_id=request.doctor_id
             )
             
             # Store in memory with composite key
@@ -1309,7 +1311,8 @@ async def submit_diagnosis(request: SubmitDiagnosisRequest):
                     payload = {
                         "manual_diagnosis": manual_data.manual_diagnosis,
                         "custom_diseases": getattr(manual_data, "custom_diseases", {}),
-                        "diagnosis_notes": getattr(manual_data, "diagnosis_notes", "")
+                        "diagnosis_notes": getattr(manual_data, "diagnosis_notes", ""),
+                        "doctor_id": getattr(manual_data, "doctor_id", None)
                     }
                 
                 # Ensure patient_id entry exists
@@ -1515,7 +1518,8 @@ async def get_manual_diagnosis(ris_exam_id: str, exam_date: Optional[str] = None
         return ManualDiagnosisData(
             manual_diagnosis={},
             custom_diseases=CustomDiseases(),
-            diagnosis_notes=""
+            diagnosis_notes="",
+            doctor_id=None
         )
 
 @app.get("/api/manual_diagnoses")

@@ -35,6 +35,7 @@ class ManualDiagnosisData(BaseModel):
     manual_diagnosis: Dict[str, Dict[str, bool]]  # 'left_eye', 'right_eye'
     custom_diseases: CustomDiseases
     diagnosis_notes: str = ""
+    doctor_id: Optional[str] = None
 
 
 class PatientData(BaseModel):
@@ -62,6 +63,7 @@ class SubmitDiagnosisRequest(BaseModel):
     manual_diagnosis: Optional[Dict[str, Dict[str, bool]]] = None
     custom_diseases: Optional[CustomDiseases] = None
     diagnosis_notes: str = ""
+    doctor_id: Optional[str] = None
     model_id: Optional[str] = None
     
 

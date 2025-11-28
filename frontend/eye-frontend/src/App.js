@@ -893,6 +893,7 @@ function App() {
   const backendUrl = `http://${backendHost}:8000`;
   const urlParams = new URLSearchParams(window.location.search);
   const currentExamId = urlParams.get('ris_exam_id');
+  const doctorIdFromUrl = urlParams.get('doctor_id');
   const maintenanceFallbackMessage = '系统维护中，请稍后再试。';
   const [maintenanceStatus, setMaintenanceStatus] = useState({
     checked: false,
@@ -2019,6 +2020,7 @@ function App() {
       exam_date: currentExamDate || null,
       image_updates: imageUpdates.length > 0 ? imageUpdates : null,
       model_id: activeModelId,
+      doctor_id: doctorIdFromUrl || null,
       ...manualDiagnosisPayload,
     };
 
