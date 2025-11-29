@@ -824,6 +824,8 @@ function App() {
   const urlParams = new URLSearchParams(window.location.search);
   const currentExamId = urlParams.get('ris_exam_id');
   const doctorIdFromUrl = urlParams.get('doctor_id');
+  const isAIMode = window.location.pathname.startsWith('/ai');
+  const isAnnotationMode = !isAIMode;
   const maintenanceFallbackMessage = '系统维护中，请稍后再试。';
   const [maintenanceStatus, setMaintenanceStatus] = useState({
     checked: false,
@@ -1396,7 +1398,7 @@ function App() {
 
   // Load LLM prompts config (update_prompt)
   useEffect(() => {
-    if (!maintenanceStatus.checked || maintenanceStatus.enabled) return;
+    if (!maintenanceStatus.checked || maintenanceStatus.enabled || isAnnotationMode) return;
     (async () => {
       try {
         const res = await fetch(`${backendUrl}/api/llm_config`, { cache: 'no-store' });
@@ -1404,11 +1406,11 @@ function App() {
       } catch {}
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [backendUrl, maintenanceStatus.checked, maintenanceStatus.enabled]);
+  }, [backendUrl, isAnnotationMode, maintenanceStatus.checked, maintenanceStatus.enabled]);
 
   // Auto-trigger LLM regeneration once per patient when chat is empty
   useEffect(() => {
-    if (maintenanceStatus.enabled) return;
+    if (maintenanceStatus.enabled || isAnnotationMode) return;
     const pid = getCurrentPatientId();
     if (!pid) return;
 
@@ -1422,7 +1424,7 @@ function App() {
     }
     // 仅监听必要的状态，避免依赖未初始化的 const
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [patientData, llmLoading, sideChatMessages.length, getCurrentPatientId, maintenanceStatus.enabled]);
+  }, [patientData, llmLoading, sideChatMessages.length, getCurrentPatientId, isAnnotationMode, maintenanceStatus.enabled]);
   
 
   // Chat scroll handling (only autoscroll if user is at bottom)
@@ -1556,7 +1558,7 @@ function App() {
 
   // NEW: fetch LLM prompts/config once
   useEffect(() => {
-    if (!maintenanceStatus.checked || maintenanceStatus.enabled) return;
+    if (!maintenanceStatus.checked || maintenanceStatus.enabled || isAnnotationMode) return;
     (async () => {
       try {
         const res = await fetch(`${backendUrl}/api/llm_config`, { cache: 'no-store' });
@@ -1569,9 +1571,11 @@ function App() {
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [backendUrl, maintenanceStatus.checked, maintenanceStatus.enabled]);
+  }, [backendUrl, isAnnotationMode, maintenanceStatus.checked, maintenanceStatus.enabled]);
 
   const patientIdPrefix = "病例索引 (Case Index): ";
+  const aiPagePath = currentExamId ? `/ai/?ris_exam_id=${currentExamId}` : '/ai/';
+  const annotationPagePath = currentExamId ? `/?ris_exam_id=${currentExamId}` : '/';
 
   const diseaseHierarchyNodes = useMemo(() => {
     const entries = Array.isArray(patientData?.diseases) && patientData.diseases.length > 0
@@ -2189,8 +2193,8 @@ function App() {
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-100 to-purple-100 p-6 font-inter text-gray-800 antialiased">
       {/* Header */}
-      <header className="bg-white rounded-xl shadow-lg p-4 mb-6 flex items-center justify-center">
-        <div className="flex items-center"> {/* Container for logo and title */}
+      <header className="relative bg-white rounded-xl shadow-lg p-4 mb-6 flex items-center justify-center">
+        <div className="flex items-center">
           {/* Replaced the div with an img tag for the logo */}
           <img
             src="/TsinghuaLogo.svg" // Changed to /TsinghuaLogo.svg
@@ -2203,9 +2207,26 @@ function App() {
             }}
           />
           <h1 className="text-xl md:text-2xl font-extrabold text-gray-900 tracking-tight whitespace-nowrap">
-            AI Eye Clinic 辅助诊断系统
+            {isAIMode ? 'AI Eye Clinic 辅助诊断系统' : 'AI Eye Clinic 影像反馈系统'}
           </h1>
         </div>
+        {/* <div className="absolute right-4 top-1/2 -translate-y-1/2 flex items-center gap-2">
+          {isAnnotationMode ? (
+            <a
+              href={aiPagePath}
+              className="px-3 py-2 text-sm rounded-lg bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100"
+            >
+              前往AI分析
+            </a>
+          ) : (
+            <a
+              href={annotationPagePath}
+              className="px-3 py-2 text-sm rounded-lg bg-green-50 text-green-700 border border-green-200 hover:bg-green-100"
+            >
+              返回标注
+            </a>
+          )}
+        </div> */}
       </header>
 
       {/* Main Content */}
@@ -2234,6 +2255,9 @@ function App() {
                 <span className="text-sm text-gray-500">
                   {patientIdPrefix}<span className="text-blue-700 font-bold">{currentExamId || 'No ID'}</span>
                 </span>
+                <span className="text-sm text-gray-500">
+                  医生ID (Doctor ID): <span className="text-indigo-700 font-semibold">{doctorIdFromUrl || '未提供'}</span>
+                </span>
                 
                 {/* Exam Date Switcher - always shown for consistency and exam time info */}
                 {availableExamInstances.length > 0 && (
@@ -2259,7 +2283,7 @@ function App() {
                   </div>
                 )}
                 
-                {availableModels.length > 0 && (
+                {isAIMode && availableModels.length > 0 && (
                   <div className="flex items-center gap-2 ml-4 px-3 py-1 bg-blue-50 border border-blue-200 rounded-md">
                     <span className="text-xs font-medium text-gray-600">模型:</span>
                     <select
@@ -2308,78 +2332,86 @@ function App() {
               {/* ...existing code... */}
             </div>
 
-            {/* New Left-Right Layout */}
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-10 items-start">
-              {/* Left column: Consultation Info - Add max-height and overflow */}
-              <div className="lg:col-span-1">
-              {/* 患者姓名搜索（可选） */}
-              <div className="mb-4 p-4 bg-blue-50 rounded-lg border border-blue-200">
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  按患者姓名搜索问诊信息
-                </label>
-                <div className="relative">
-                  <input
-                    type="text"
-                    value={patientNameSearch}
-                    onChange={(e) => handlePatientNameSearch(e.target.value)}
-                    onFocus={() => patientNameSearch && setShowNameSuggestions(true)}
-                    placeholder="输入患者姓名..."
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  />
-                  {showNameSuggestions && (
-                    <div className="absolute z-10 w-full mt-1 bg-white border border-gray-300 rounded-md shadow-lg max-h-60 overflow-y-auto">
-                      {availablePatientNames
-                        .filter(name => name.includes(patientNameSearch))
-                        .map((name, idx) => (
-                          <div
-                            key={idx}
-                            onClick={() => selectPatientName(name)}
-                            className="px-3 py-2 cursor-pointer hover:bg-blue-50 border-b border-gray-100 last:border-b-0"
-                          >
-                            {name}
-                          </div>
-                        ))}
-                    </div>
-                  )}
-                </div>
-                {patientNameSearch && (
-                  <div className="mt-2 flex space-x-2">
-                    <button
-                      onClick={() => fetchConsultationInfo(currentPatientId, patientNameSearch)}
-                      className="px-3 py-1 bg-blue-600 text-white rounded text-sm hover:bg-blue-700"
-                    >
-                      搜索
-                    </button>
-                    <button
-                      onClick={() => { setPatientNameSearch(''); fetchConsultationInfo(currentPatientId); }}
-                      className="px-3 py-1 bg-gray-600 text-white rounded text-sm hover:bg-gray-700"
-                    >
-                      重置
-                    </button>
-                  </div>
-                )}
+            {/* {isAnnotationMode && (
+              <div className="mb-6 px-4 py-3 rounded-lg bg-green-50 border border-green-200 text-sm text-green-800">
+                当前为标注视图，仅显示影像与人工标注功能。AI分析请访问 <a href={aiPagePath} className="underline font-semibold">/ai/</a>。
               </div>
+            )} */}
 
-              {/* 原有问诊信息表单 - Add max-height with overflow */}
-              <div className="max-h-[600px] overflow-y-auto">
-                <ConsultationInfoSection 
-                  consultationData={consultationDataEdited}
-                  onChange={handleConsultationChange}
-                  onSubmit={handleConsultationSubmit}
-                  isSubmitting={isConsultationSubmitting}
-                />
-                {consultationSubmitMessage && (
-                  <div className="mt-2 text-center">
-                    <p className="text-green-600 text-sm">{consultationSubmitMessage}</p>
+            {/* New Left-Right Layout */}
+            <div className={isAnnotationMode ? 'mb-10' : 'grid grid-cols-1 lg:grid-cols-3 gap-6 mb-10 items-start'}>
+              {/* Left column: Consultation Info - hide on annotation-only view */}
+              {!isAnnotationMode && (
+                <div className="lg:col-span-1">
+                  {/* 患者姓名搜索（可选） */}
+                  <div className="mb-4 p-4 bg-blue-50 rounded-lg border border-blue-200">
+                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                      按患者姓名搜索问诊信息
+                    </label>
+                    <div className="relative">
+                      <input
+                        type="text"
+                        value={patientNameSearch}
+                        onChange={(e) => handlePatientNameSearch(e.target.value)}
+                        onFocus={() => patientNameSearch && setShowNameSuggestions(true)}
+                        placeholder="输入患者姓名..."
+                        className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      />
+                      {showNameSuggestions && (
+                        <div className="absolute z-10 w-full mt-1 bg-white border border-gray-300 rounded-md shadow-lg max-h-60 overflow-y-auto">
+                          {availablePatientNames
+                            .filter(name => name.includes(patientNameSearch))
+                            .map((name, idx) => (
+                              <div
+                                key={idx}
+                                onClick={() => selectPatientName(name)}
+                                className="px-3 py-2 cursor-pointer hover:bg-blue-50 border-b border-gray-100 last:border-b-0"
+                              >
+                                {name}
+                              </div>
+                            ))}
+                        </div>
+                      )}
+                    </div>
+                    {patientNameSearch && (
+                      <div className="mt-2 flex space-x-2">
+                        <button
+                          onClick={() => fetchConsultationInfo(currentPatientId, patientNameSearch)}
+                          className="px-3 py-1 bg-blue-600 text-white rounded text-sm hover:bg-blue-700"
+                        >
+                          搜索
+                        </button>
+                        <button
+                          onClick={() => { setPatientNameSearch(''); fetchConsultationInfo(currentPatientId); }}
+                          className="px-3 py-1 bg-gray-600 text-white rounded text-sm hover:bg-gray-700"
+                        >
+                          重置
+                        </button>
+                      </div>
+                    )}
                   </div>
-                )}
-              </div>
-            </div>
+
+                  {/* 原有问诊信息表单 - Add max-height with overflow */}
+                  <div className="max-h-[600px] overflow-y-auto">
+                    <ConsultationInfoSection 
+                      consultationData={consultationDataEdited}
+                      onChange={handleConsultationChange}
+                      onSubmit={handleConsultationSubmit}
+                      isSubmitting={isConsultationSubmitting}
+                    />
+                    {consultationSubmitMessage && (
+                      <div className="mt-2 text-center">
+                        <p className="text-green-600 text-sm">{consultationSubmitMessage}</p>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
               
               {/* Right column: Images */}
-              <div className="lg:col-span-2 h-full">
+              <div className={`${isAnnotationMode ? '' : 'lg:col-span-2'} h-full`}>
                 {/* Image Display Section */}
-                <div className="relative flex h-full items-center justify-center bg-gray-50 p-6 rounded-xl shadow-inner min-h-[560px]">
+                <div className="relative flex h-full items-center justify-center bg-gray-50 p-6 rounded-xl shadow-inner min-h-[660px]">
                   <div className="flex flex-wrap justify-center gap-6 mx-auto">
                     {selectedDisplayImages
                       .filter((imageId) => imageId)
@@ -2388,7 +2420,7 @@ function App() {
                       return (
                         <div
                           key={index}
-                          className="flex-shrink-0 w-56 h-64 bg-white rounded-lg shadow-md overflow-hidden border border-gray-200 transform hover:scale-105 transition-transform duration-200 group cursor-pointer"
+                          className="flex-shrink-0 w-72 h-80 bg-white rounded-lg shadow-md overflow-hidden border border-gray-200 transform hover:scale-105 transition-transform duration-200 group cursor-pointer"
                           onClick={() => imgInfo && openExpandedImageModal(imgInfo)}
                         >
                           {imgInfo ? (
@@ -2396,7 +2428,7 @@ function App() {
                               <img
                                 src={`data:image/png;base64,${imgInfo.base64_data}`}
                                 alt={imgInfo.type || `第${index + 1}张`}
-                                className="w-full h-48 object-cover border-b border-gray-200 group-hover:opacity-80 transition-opacity"
+                                className="w-full h-60 object-cover border-b border-gray-200 group-hover:opacity-80 transition-opacity"
                               />
                               <div className="p-3 text-sm text-center">
                                 <p className="font-semibold text-gray-900 group-hover:text-blue-700 transition-colors">IMAGE {index + 1}</p>
@@ -2428,283 +2460,284 @@ function App() {
               </div>
             </div>
 
-            {/* Replace the existing AI sections and LLM Chat layout with new grid structure */}
-            <div className="mb-6">
-              {/* Side-by-side AI sections - Reduced height */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
-                {/* Left: AI Examination Summary - Center content, reduce padding */}
-                <div className="p-4 rounded-2xl shadow-sm border border-indigo-300 bg-indigo-50/60">
-                  <h3 className="text-xl font-bold mb-3 text-indigo-900 text-center tracking-tight">
-                    AI检查摘要 (AI Examination Summary)
-                  </h3>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    {['right_eye', 'left_eye'].map((eyeKey) => {
-                      const eyeLabel = eyeKey === 'left_eye' ? '左眼 (Left Eye)' : '右眼 (Right Eye)';
-                      const { primaries, secondaries } = getEyeHighlights(eyeKey);
-                      const statusTextMap = {
-                        '明显偏高': '明显高于阈值 / Markedly above T',
-                        '较高': '高于阈值 / Above T',
-                        '接近阈值': '接近阈值 / Near T',
-                        '较低': '低于阈值 / Below T',
-                        '正常': '整体正常 / Normal overall'
-                      };
-                      return (
-                        <div key={eyeKey} className="p-3 rounded-xl bg-white border border-indigo-200 shadow-sm">
-                          <div className="text-sm font-semibold text-gray-800 mb-2 text-center">{eyeLabel}</div>
-                          {primaries.length > 0 ? (
-                            <div className="text-center">
-                              {/* Primaries: show all above-threshold or the top one if none above */}
-                              <div className="flex flex-col gap-2">
-                                {primaries.map((pItem) => {
-                                  const isNormal = normalDiseaseKeys.has(pItem.key);
-                                  const depth = pItem.depth || 0;
-                                  const label = diseaseInfo[pItem.key]?.chinese || pItem.name;
-                                  return isNormal ? (
-                                    <div key={pItem.key}>
-                                      <div className="mt-1 text-xs text-gray-600">总体判断 (Overall)</div>
-                                      <div className="text-lg md:text-xl font-semibold text-green-700">
-                                        {label || '正常'}
+            {isAIMode && (
+              <div className="mb-6">
+                {/* Side-by-side AI sections - Reduced height */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+                  {/* Left: AI Examination Summary - Center content, reduce padding */}
+                  <div className="p-4 rounded-2xl shadow-sm border border-indigo-300 bg-indigo-50/60">
+                    <h3 className="text-xl font-bold mb-3 text-indigo-900 text-center tracking-tight">
+                      AI检查摘要 (AI Examination Summary)
+                    </h3>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      {['right_eye', 'left_eye'].map((eyeKey) => {
+                        const eyeLabel = eyeKey === 'left_eye' ? '左眼 (Left Eye)' : '右眼 (Right Eye)';
+                        const { primaries, secondaries } = getEyeHighlights(eyeKey);
+                        const statusTextMap = {
+                          '明显偏高': '明显高于阈值 / Markedly above T',
+                          '较高': '高于阈值 / Above T',
+                          '接近阈值': '接近阈值 / Near T',
+                          '较低': '低于阈值 / Below T',
+                          '正常': '整体正常 / Normal overall'
+                        };
+                        return (
+                          <div key={eyeKey} className="p-3 rounded-xl bg-white border border-indigo-200 shadow-sm">
+                            <div className="text-sm font-semibold text-gray-800 mb-2 text-center">{eyeLabel}</div>
+                            {primaries.length > 0 ? (
+                              <div className="text-center">
+                                {/* Primaries: show all above-threshold or the top one if none above */}
+                                <div className="flex flex-col gap-2">
+                                  {primaries.map((pItem) => {
+                                    const isNormal = normalDiseaseKeys.has(pItem.key);
+                                    const depth = pItem.depth || 0;
+                                    const label = diseaseInfo[pItem.key]?.chinese || pItem.name;
+                                    return isNormal ? (
+                                      <div key={pItem.key}>
+                                        <div className="mt-1 text-xs text-gray-600">总体判断 (Overall)</div>
+                                        <div className="text-lg md:text-xl font-semibold text-green-700">
+                                          {label || '正常'}
+                                        </div>
                                       </div>
+                                    ) : (
+                                      <div key={pItem.key}>
+                                        <div className="text-xs text-gray-600">首要考虑 (Primary)</div>
+                                        <div className="text-base md:text-lg font-semibold text-gray-900 flex items-center justify-center gap-1">
+                                          {depth > 0 && <span className="text-gray-400 text-xs">↳</span>}
+                                          <span>{label}</span>
+                                        </div>
+                                        <div className="flex items-center justify-center gap-2 mt-1">
+                                          <span className="inline-flex items-center px-2 py-0.5 rounded bg-blue-50 text-blue-800 text-xs border border-blue-200">
+                                            P {formatProb(pItem.p)} · T {formatProb(pItem.t)}
+                                          </span>
+                                          <span className={
+                                            `inline-flex items-center px-2 py-0.5 rounded text-xs border ${
+                                              pItem.status === '明显偏高' ? 'bg-red-50 text-red-800 border-red-200' :
+                                              pItem.status === '较高' ? 'bg-orange-50 text-orange-800 border-orange-200' :
+                                              pItem.status === '接近阈值' ? 'bg-yellow-50 text-yellow-800 border-yellow-200' :
+                                              pItem.status === '正常' ? 'bg-green-50 text-green-700 border-green-200' :
+                                              'bg-gray-50 text-gray-700 border-gray-200'
+                                            }`
+                                          }>
+                                            {statusTextMap[pItem.status] || pItem.status}
+                                          </span>
+                                        </div>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+
+                                {secondaries.length > 0 && (
+                                  <div className="mt-2">
+                                    <div className="text-xs font-medium text-gray-500 tracking-wide">次要关注 (Secondary)</div>
+                                    <div className="mt-1 flex flex-wrap justify-center gap-1">
+                                      {secondaries.map((o) => {
+                                        const depth = o.depth || 0;
+                                        return (
+                                          <span
+                                            key={o.key}
+                                            className={`px-2 py-0.5 rounded-full bg-amber-400/10 text-amber-700 text-xs border border-amber-300/40 opacity-85 flex items-center gap-1 ${
+                                              depth ? 'pl-3' : ''
+                                            }`}
+                                          >
+                                            {depth > 0 && <span className="text-gray-400 text-[10px]">↳</span>}
+                                            {o.name}
+                                          </span>
+                                        );
+                                      })}
                                     </div>
-                                  ) : (
-                                    <div key={pItem.key}>
-                                      <div className="text-xs text-gray-600">首要考虑 (Primary)</div>
-                                      <div className="text-base md:text-lg font-semibold text-gray-900 flex items-center justify-center gap-1">
-                                        {depth > 0 && <span className="text-gray-400 text-xs">↳</span>}
-                                        <span>{label}</span>
-                                      </div>
-                                      <div className="flex items-center justify-center gap-2 mt-1">
-                                        <span className="inline-flex items-center px-2 py-0.5 rounded bg-blue-50 text-blue-800 text-xs border border-blue-200">
-                                          P {formatProb(pItem.p)} · T {formatProb(pItem.t)}
-                                        </span>
-                                        <span className={
-                                          `inline-flex items-center px-2 py-0.5 rounded text-xs border ${
-                                            pItem.status === '明显偏高' ? 'bg-red-50 text-red-800 border-red-200' :
-                                            pItem.status === '较高' ? 'bg-orange-50 text-orange-800 border-orange-200' :
-                                            pItem.status === '接近阈值' ? 'bg-yellow-50 text-yellow-800 border-yellow-200' :
-                                            pItem.status === '正常' ? 'bg-green-50 text-green-700 border-green-200' :
-                                            'bg-gray-50 text-gray-700 border-gray-200'
-                                          }`
-                                        }>
-                                          {statusTextMap[pItem.status] || pItem.status}
-                                        </span>
-                                      </div>
-                                    </div>
-                                  );
-                                })}
+                                  </div>
+                                )}
                               </div>
-
-                              {secondaries.length > 0 && (
-                                <div className="mt-2">
-                                  <div className="text-xs font-medium text-gray-500 tracking-wide">次要关注 (Secondary)</div>
-                                  <div className="mt-1 flex flex-wrap justify-center gap-1">
-                                    {secondaries.map((o) => {
-                                      const depth = o.depth || 0;
-                                      return (
-                                        <span
-                                          key={o.key}
-                                          className={`px-2 py-0.5 rounded-full bg-amber-400/10 text-amber-700 text-xs border border-amber-300/40 opacity-85 flex items-center gap-1 ${
-                                            depth ? 'pl-3' : ''
-                                          }`}
-                                        >
-                                          {depth > 0 && <span className="text-gray-400 text-[10px]">↳</span>}
-                                          {o.name}
-                                        </span>
-                                      );
-                                    })}
-                                  </div>
-                                </div>
-                              )}
-                            </div>
-                          ) : (
-                            <div className="text-sm text-gray-500 text-center">暂无要点 (No highlights)</div>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-
-                {/* Right: Prediction Probability Bars (Further shrunk) */}
-                <div className="p-3 rounded-lg shadow-sm border border-gray-100 bg-white">
-                  <h3 className="text-lg font-semibold mb-2 text-gray-700 text-center">AI预测概率 (Model Prediction Probabilities)</h3>
-                  <p className="text-xs text-gray-500 mb-2 text-center">彩条长度按阈值重新映射: 阈值位于条形中点 (50%)。</p>
-                  <div className="overflow-y-auto max-h-[320px]">
-                    <table className="min-w-full table-fixed text-xs">
-                      <thead className="sticky top-0 bg-white shadow-sm z-10">
-                        <tr>
-                          <th className="w-[30%] p-1 text-left text-gray-600 font-medium">疾病 (Disease)</th>
-                          <th className="p-1 text-center text-gray-600 font-medium">右眼 (R)</th>
-                          <th className="p-1 text-center text-gray-600 font-medium">左眼 (L)</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {diseaseHierarchyNodes.map(({ key: dk, depth }) => {
-                          const thresholds = patientData?.prediction_thresholds || {};
-                          const t = thresholds[dk] ?? 0.5;
-                          const leftProb = patientData?.prediction_results?.left_eye?.[dk] ?? 0.0;
-                          const rightProb = patientData?.prediction_results?.right_eye?.[dk] ?? 0.0;
-                          const leftWidthRaw = mapProbToWidth(leftProb, t) * 100;
-                          const rightWidthRaw = mapProbToWidth(rightProb, t) * 100;
-                          const clamp = (v) => Math.min(100, Math.max(0, v));
-                          const leftWidth = clamp(leftWidthRaw);
-                          const rightWidth = clamp(rightWidthRaw);
-                          const info = diseaseInfo[dk] || {};
-                          const isChild = depth > 0;
-                          return (
-                            <tr key={dk} className="border-t border-gray-100">
-                              <td className="p-1 align-middle text-gray-700 whitespace-nowrap font-medium">
-                                <div className={`flex flex-col ${isChild ? 'pl-3 border-l border-gray-200 ml-1' : ''}`}>
-                                  <span className="font-semibold text-gray-800 flex items-center gap-1">
-                                    {isChild && <span className="text-gray-400 text-[10px]">↳</span>}
-                                    {info.chinese || dk}
-                                  </span>
-                                  <span className="text-xs text-gray-500">{info.shortName || info.english || dk}</span>
-                                </div>
-                              </td>
-                              <td className="p-1">
-                                <div className="relative h-3 rounded-full bg-gradient-to-r from-green-300 via-yellow-300 to-red-400 overflow-hidden shadow-inner">
-                                  <div className="absolute top-0 left-0 h-full bg-green-600/20" style={{ width: `${rightWidth}%` }} />
-                                  <div className="absolute top-0 left-1/2 w-0.5 h-full bg-gray-600/70" />
-                                  <div className="absolute top-0 h-full flex items-center" style={{ left: `${rightWidth}%`, transform: 'translateX(-50%)' }}
-                                       title={`${info.fullName || info.english || dk}: P:${formatProb(rightProb)} T:${formatProb(t)}`}>
-                                    <div className="w-0.5 h-full bg-blue-700/70"></div>
-                                    <div className="absolute left-1/2 top-1/2 w-1.5 h-1.5 -translate-x-1/2 -translate-y-1/2 rotate-45 bg-blue-600 border border-white shadow-sm" />
-                                  </div>
-                                  <div className="absolute inset-0 flex justify-between px-1 text-[8px] leading-3 text-gray-600 select-none font-medium">
-                                    <span>{formatProb(rightProb)}</span>
-                                    <span className="text-gray-500">T:{formatProb(t)}</span>
-                                  </div>
-                                </div>
-                              </td>
-                              <td className="p-1">
-                                <div className="relative h-3 rounded-full bg-gradient-to-r from-green-300 via-yellow-300 to-red-400 overflow-hidden shadow-inner">
-                                  <div className="absolute top-0 left-0 h-full bg-green-600/20" style={{ width: `${leftWidth}%` }} />
-                                  <div className="absolute top-0 left-1/2 w-0.5 h-full bg-gray-600/70" />
-                                  <div className="absolute top-0 h-full flex items-center" style={{ left: `${leftWidth}%`, transform: 'translateX(-50%)' }}
-                                       title={`${info.fullName || info.english || dk}: P:${formatProb(leftProb)} T:${formatProb(t)}`}>
-                                    <div className="w-0.5 h-full bg-blue-700/70"></div>
-                                    <div className="absolute left-1/2 top-1/2 w-1.5 h-1.5 -translate-x-1/2 -translate-y-1/2 rotate-45 bg-blue-600 border border-white shadow-sm" />
-                                  </div>
-                                  <div className="absolute inset-0 flex justify-between px-1 text-[8px] leading-3 text-gray-600 select-none font-medium">
-                                    <span>{formatProb(leftProb)}</span>
-                                    <span className="text-gray-500">T:{formatProb(t)}</span>
-                                  </div>
-                                </div>
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              </div>
-
-              {/* Full-width LLM Chat section below - unchanged */}
-              <div className="p-5 rounded-lg shadow-sm border border-gray-100 bg-white w-full">
-                <div className="flex items-center justify-between mb-1">
-                  <h3 className="text-lg font-semibold text-gray-800">临床助手 / LLM Chat</h3>
-                  {!llmLoading ? (
-                    <button
-                      className="px-3 py-1.5 text-xs rounded bg-blue-600 text-white hover:bg-blue-700"
-                      onClick={regenerateSideOpinion}
-                      title="根据最新结果生成摘要"
-                    >
-                      更新最新结果
-                    </button>
-                  ) : (
-                    <button
-                      className="px-3 py-1.5 text-xs rounded bg-red-600 text-white hover:bg-red-700"
-                      onClick={() => llmAbortCtrl?.abort()}
-                      title="停止生成"
-                    >
-                      停止
-                    </button>
-                  )}
-                </div>
-
-                {/* Chat scroll area with fixed height - Made 2x taller */}
-                <div
-                  ref={sideChatScrollRef}
-                  onScroll={handleSideChatScroll}
-                  className="relative h-[600px] overflow-y-auto overscroll-contain
-                           border border-gray-200 rounded p-2 bg-gray-50 mb-3"
-                >
-                  {sideChatMessages.length === 0 && (
-                    <div className="text-gray-400 text-sm">暂无对话</div>
-                  )}
-                  {sideChatMessages.map((m, i) => (
-                    <div key={i} className={`mb-3 ${m.role === 'user' ? 'text-right' : 'text-left'}`}>
-                      <div className={`inline-block px-3 py-2 rounded-lg max-w-[90%] ${
-                        m.role === 'user'
-                          ? 'bg-blue-100 text-blue-900'
-                          : 'bg-white text-gray-800 border border-gray-200 shadow-sm'
-                      }`}>
-                        {m.role === 'user' ? (
-                          <span className="text-sm whitespace-pre-wrap">{m.content}</span>
-                        ) : (
-                          <div className="text-sm">
-                            <div
-                              className="prose prose-sm max-w-none prose-headings:mt-2 prose-headings:mb-1 prose-p:my-1"
-                              dangerouslySetInnerHTML={{ __html: renderMarkdownContent(m.content) }}
-                            />
-                            {llmLoading && i === sideChatMessages.length - 1 && (
-                              <span className="inline-block w-2 h-4 bg-gray-400 ml-1 animate-pulse" />
+                            ) : (
+                              <div className="text-sm text-gray-500 text-center">暂无要点 (No highlights)</div>
                             )}
                           </div>
-                        )}
-                      </div>
+                        );
+                      })}
                     </div>
-                  ))}
+                  </div>
+
+                  {/* Right: Prediction Probability Bars (Further shrunk) */}
+                  <div className="p-3 rounded-lg shadow-sm border border-gray-100 bg-white">
+                    <h3 className="text-lg font-semibold mb-2 text-gray-700 text-center">AI预测概率 (Model Prediction Probabilities)</h3>
+                    <p className="text-xs text-gray-500 mb-2 text-center">彩条长度按阈值重新映射: 阈值位于条形中点 (50%)。</p>
+                    <div className="overflow-y-auto max-h-[320px]">
+                      <table className="min-w-full table-fixed text-xs">
+                        <thead className="sticky top-0 bg-white shadow-sm z-10">
+                          <tr>
+                            <th className="w-[30%] p-1 text-left text-gray-600 font-medium">疾病 (Disease)</th>
+                            <th className="p-1 text-center text-gray-600 font-medium">右眼 (R)</th>
+                            <th className="p-1 text-center text-gray-600 font-medium">左眼 (L)</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {diseaseHierarchyNodes.map(({ key: dk, depth }) => {
+                            const thresholds = patientData?.prediction_thresholds || {};
+                            const t = thresholds[dk] ?? 0.5;
+                            const leftProb = patientData?.prediction_results?.left_eye?.[dk] ?? 0.0;
+                            const rightProb = patientData?.prediction_results?.right_eye?.[dk] ?? 0.0;
+                            const leftWidthRaw = mapProbToWidth(leftProb, t) * 100;
+                            const rightWidthRaw = mapProbToWidth(rightProb, t) * 100;
+                            const clamp = (v) => Math.min(100, Math.max(0, v));
+                            const leftWidth = clamp(leftWidthRaw);
+                            const rightWidth = clamp(rightWidthRaw);
+                            const info = diseaseInfo[dk] || {};
+                            const isChild = depth > 0;
+                            return (
+                              <tr key={dk} className="border-t border-gray-100">
+                                <td className="p-1 align-middle text-gray-700 whitespace-nowrap font-medium">
+                                  <div className={`flex flex-col ${isChild ? 'pl-3 border-l border-gray-200 ml-1' : ''}`}>
+                                    <span className="font-semibold text-gray-800 flex items-center gap-1">
+                                      {isChild && <span className="text-gray-400 text-[10px]">↳</span>}
+                                      {info.chinese || dk}
+                                    </span>
+                                    <span className="text-xs text-gray-500">{info.shortName || info.english || dk}</span>
+                                  </div>
+                                </td>
+                                <td className="p-1">
+                                  <div className="relative h-3 rounded-full bg-gradient-to-r from-green-300 via-yellow-300 to-red-400 overflow-hidden shadow-inner">
+                                    <div className="absolute top-0 left-0 h-full bg-green-600/20" style={{ width: `${rightWidth}%` }} />
+                                    <div className="absolute top-0 left-1/2 w-0.5 h-full bg-gray-600/70" />
+                                    <div className="absolute top-0 h-full flex items-center" style={{ left: `${rightWidth}%`, transform: 'translateX(-50%)' }}
+                                         title={`${info.fullName || info.english || dk}: P:${formatProb(rightProb)} T:${formatProb(t)}`}>
+                                      <div className="w-0.5 h-full bg-blue-700/70"></div>
+                                      <div className="absolute left-1/2 top-1/2 w-1.5 h-1.5 -translate-x-1/2 -translate-y-1/2 rotate-45 bg-blue-600 border border-white shadow-sm" />
+                                    </div>
+                                    <div className="absolute inset-0 flex justify-between px-1 text-[8px] leading-3 text-gray-600 select-none font-medium">
+                                      <span>{formatProb(rightProb)}</span>
+                                      <span className="text-gray-500">T:{formatProb(t)}</span>
+                                    </div>
+                                  </div>
+                                </td>
+                                <td className="p-1">
+                                  <div className="relative h-3 rounded-full bg-gradient-to-r from-green-300 via-yellow-300 to-red-400 overflow-hidden shadow-inner">
+                                    <div className="absolute top-0 left-0 h-full bg-green-600/20" style={{ width: `${leftWidth}%` }} />
+                                    <div className="absolute top-0 left-1/2 w-0.5 h-full bg-gray-600/70" />
+                                    <div className="absolute top-0 h-full flex items-center" style={{ left: `${leftWidth}%`, transform: 'translateX(-50%)' }}
+                                         title={`${info.fullName || info.english || dk}: P:${formatProb(leftProb)} T:${formatProb(t)}`}>
+                                      <div className="w-0.5 h-full bg-blue-700/70"></div>
+                                      <div className="absolute left-1/2 top-1/2 w-1.5 h-1.5 -translate-x-1/2 -translate-y-1/2 rotate-45 bg-blue-600 border border-white shadow-sm" />
+                                    </div>
+                                    <div className="absolute inset-0 flex justify-between px-1 text-[8px] leading-3 text-gray-600 select-none font-medium">
+                                      <span>{formatProb(leftProb)}</span>
+                                      <span className="text-gray-500">T:{formatProb(t)}</span>
+                                    </div>
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
                 </div>
 
-                {/* "Back to bottom" button */}
-                {!autoScrollChat && (
-                  <button
-                    onClick={() => {
-                      const el = sideChatScrollRef.current;
-                      if (!el) return;
-                      el.scrollTop = el.scrollHeight;
-                      setAutoScrollChat(true);
-                    }}
-                    className="absolute bottom-[60px] right-8 px-2 py-1 text-xs rounded
-                             bg-blue-600 text-white shadow hover:bg-blue-700 z-20"
-                    title="回到底部"
-                  >
-                    回到底部
-                  </button>
-                )}
+                {/* Full-width LLM Chat section below - unchanged */}
+                <div className="p-5 rounded-lg shadow-sm border border-gray-100 bg-white w-full">
+                  <div className="flex items-center justify-between mb-1">
+                    <h3 className="text-lg font-semibold text-gray-800">临床助手 / LLM Chat</h3>
+                    {!llmLoading ? (
+                      <button
+                        className="px-3 py-1.5 text-xs rounded bg-blue-600 text-white hover:bg-blue-700"
+                        onClick={regenerateSideOpinion}
+                        title="根据最新结果生成摘要"
+                      >
+                        更新最新结果
+                      </button>
+                    ) : (
+                      <button
+                        className="px-3 py-1.5 text-xs rounded bg-red-600 text-white hover:bg-red-700"
+                        onClick={() => llmAbortCtrl?.abort()}
+                        title="停止生成"
+                      >
+                        停止
+                      </button>
+                    )}
+                  </div>
 
-                {/* Input area */}
-                <div className="flex gap-2">
-                  <input
-                    className="flex-1 border border-gray-300 rounded px-3 py-2 text-sm"
-                    placeholder="在此输入问题…"
-                    value={sideChatInput}
-                    onChange={(e) => setSideChatInput(e.target.value)}
-                    onKeyDown={(e) => { if (e.key === 'Enter' && !llmLoading) sendSideChatStreaming(); }}
-                    disabled={llmLoading}
-                  />
-                  {!llmLoading ? (
+                  {/* Chat scroll area with fixed height - Made 2x taller */}
+                  <div
+                    ref={sideChatScrollRef}
+                    onScroll={handleSideChatScroll}
+                    className="relative h-[600px] overflow-y-auto overscroll-contain
+                             border border-gray-200 rounded p-2 bg-gray-50 mb-3"
+                  >
+                    {sideChatMessages.length === 0 && (
+                      <div className="text-gray-400 text-sm">暂无对话</div>
+                    )}
+                    {sideChatMessages.map((m, i) => (
+                      <div key={i} className={`mb-3 ${m.role === 'user' ? 'text-right' : 'text-left'}`}>
+                        <div className={`inline-block px-3 py-2 rounded-lg max-w-[90%] ${
+                          m.role === 'user'
+                            ? 'bg-blue-100 text-blue-900'
+                            : 'bg-white text-gray-800 border border-gray-200 shadow-sm'
+                        }`}>
+                          {m.role === 'user' ? (
+                            <span className="text-sm whitespace-pre-wrap">{m.content}</span>
+                          ) : (
+                            <div className="text-sm">
+                              <div
+                                className="prose prose-sm max-w-none prose-headings:mt-2 prose-headings:mb-1 prose-p:my-1"
+                                dangerouslySetInnerHTML={{ __html: renderMarkdownContent(m.content) }}
+                              />
+                              {llmLoading && i === sideChatMessages.length - 1 && (
+                                <span className="inline-block w-2 h-4 bg-gray-400 ml-1 animate-pulse" />
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* "Back to bottom" button */}
+                  {!autoScrollChat && (
                     <button
-                      className="px-3 py-2 rounded bg-blue-600 text-white text-sm hover:bg-blue-700"
-                      onClick={() => sendSideChatStreaming()}
-                      disabled={!sideChatInput.trim()}
+                      onClick={() => {
+                        const el = sideChatScrollRef.current;
+                        if (!el) return;
+                        el.scrollTop = el.scrollHeight;
+                        setAutoScrollChat(true);
+                      }}
+                      className="absolute bottom-[60px] right-8 px-2 py-1 text-xs rounded
+                               bg-blue-600 text-white shadow hover:bg-blue-700 z-20"
+                      title="回到底部"
                     >
-                      发送
-                    </button>
-                  ) : (
-                    <button
-                      className="px-3 py-2 rounded bg-red-600 text-white text-sm hover:bg-red-700"
-                      onClick={() => llmAbortCtrl?.abort()}
-                    >
-                      停止
+                      回到底部
                     </button>
                   )}
+
+                  {/* Input area */}
+                  <div className="flex gap-2">
+                    <input
+                      className="flex-1 border border-gray-300 rounded px-3 py-2 text-sm"
+                      placeholder="在此输入问题…"
+                      value={sideChatInput}
+                      onChange={(e) => setSideChatInput(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === 'Enter' && !llmLoading) sendSideChatStreaming(); }}
+                      disabled={llmLoading}
+                    />
+                    {!llmLoading ? (
+                      <button
+                        className="px-3 py-2 rounded bg-blue-600 text-white text-sm hover:bg-blue-700"
+                        onClick={() => sendSideChatStreaming()}
+                        disabled={!sideChatInput.trim()}
+                      >
+                        发送
+                      </button>
+                    ) : (
+                      <button
+                        className="px-3 py-2 rounded bg-red-600 text-white text-sm hover:bg-red-700"
+                        onClick={() => llmAbortCtrl?.abort()}
+                      >
+                        停止
+                      </button>
+                    )}
+                  </div>
                 </div>
               </div>
-            </div>
+            )}
 
             {/* Unified Interactive Correction Section */}
             <div className="mb-10 p-6 rounded-lg shadow-sm border border-gray-200 bg-white">
@@ -2878,14 +2911,16 @@ function App() {
                   </span>
                 </div>
                 <div className="flex gap-4 md:justify-end w-full md:w-auto">
-                  <button
-                    onClick={handleAlterThreshold}
-                    disabled={isAlteringThreshold}
-                    className={`px-6 py-2.5 rounded-lg shadow-md transition-colors duration-200 text-sm font-semibold
-                      ${isAlteringThreshold ? 'bg-blue-300 cursor-not-allowed text-white' : 'bg-blue-600 text-white hover:bg-blue-700'}`}
-                  >
-                    {isAlteringThreshold ? '更新中...' : `${activeThresholdSetLabel} (Alter Threshold)`}
-                  </button>
+                  {isAIMode && (
+                    <button
+                      onClick={handleAlterThreshold}
+                      disabled={isAlteringThreshold}
+                      className={`px-6 py-2.5 rounded-lg shadow-md transition-colors duration-200 text-sm font-semibold
+                        ${isAlteringThreshold ? 'bg-blue-300 cursor-not-allowed text-white' : 'bg-blue-600 text-white hover:bg-blue-700'}`}
+                    >
+                      {isAlteringThreshold ? '更新中...' : `${activeThresholdSetLabel} (Alter Threshold)`}
+                    </button>
+                  )}
                   <button
                     onClick={handleDiscardChanges}
                     className="px-6 py-2.5 bg-red-500 text-white rounded-lg shadow-md hover:bg-red-600 transition-colors duration-200 text-sm font-semibold"
@@ -2961,11 +2996,17 @@ function App() {
       </main>
 
       {/* Disclaimer */}
-      <footer className="mt-8 text-center text-gray-600 text-xs">
-        *人工智能系统存在一定局限性，可能产生误差，相关检测结果仅供参考，不构成最终决策依据。
-        <br />
-        (*AI system has certain limitations and may produce errors. Related detection results are for reference only, not as final decision basis.)
-      </footer>
+      {isAIMode ? (
+        <footer className="mt-8 text-center text-gray-600 text-xs">
+          *人工智能系统存在一定局限性，可能产生误差，相关检测结果仅供参考，不构成最终决策依据。
+          <br />
+          (*AI system has certain limitations and may produce errors. Related detection results are for reference only, not as final decision basis.)
+        </footer>
+      ) : (
+        <footer className="mt-8 text-center text-gray-600 text-xs">
+          {/* 需要AI辅助诊断？请访问 <a href={aiPagePath} className="text-blue-600 underline">/ai/</a> 查看完整AI页面。 */}
+        </footer>
+      )}
 
       <ReselectImageModal
         isOpen={isModalOpen}
