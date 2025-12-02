@@ -96,6 +96,11 @@ export const MANUAL_DISEASE_INFO = {
 export const MANUAL_PHRASE_ALIASES = {
   糖网: 'DR',
   DR: 'DR',
+  Glaucoma: '青光眼',
+  'Pathological Myopia': '病理性近视',
+  'Pathologic Myopia': '病理性近视',
+  PM: '病理性近视',
+  'High Myopia': '病理性近视',
   '视网膜动脉阻塞': '视网膜动脉阻塞',
   RAO: '视网膜动脉阻塞',
   '视网膜静脉阻塞': 'RVO',

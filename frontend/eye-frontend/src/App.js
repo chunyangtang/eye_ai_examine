@@ -1881,11 +1881,18 @@ function App() {
 
   const resolvePhraseKey = useCallback((diseaseKey) => {
     if (!diseaseKey) return diseaseKey;
-    if (MANUAL_PHRASE_ALIASES[diseaseKey]) return MANUAL_PHRASE_ALIASES[diseaseKey];
+    const keyStr = String(diseaseKey);
+    const lower = keyStr.toLowerCase();
+    const canonical = diseaseAliasMap?.[keyStr] || diseaseAliasMap?.[lower];
+    if (MANUAL_PHRASE_ALIASES[keyStr]) return MANUAL_PHRASE_ALIASES[keyStr];
+    if (canonical && MANUAL_PHRASE_ALIASES[canonical]) return MANUAL_PHRASE_ALIASES[canonical];
     const shortName = manualDiseaseInfo[diseaseKey]?.shortName;
     if (shortName && MANUAL_PHRASE_ALIASES[shortName]) return MANUAL_PHRASE_ALIASES[shortName];
-    return diseaseKey;
-  }, [manualDiseaseInfo]);
+    if (canonical && manualDiseaseInfo[canonical]?.shortName && MANUAL_PHRASE_ALIASES[manualDiseaseInfo[canonical].shortName]) {
+      return MANUAL_PHRASE_ALIASES[manualDiseaseInfo[canonical].shortName];
+    }
+    return canonical || diseaseKey;
+  }, [diseaseAliasMap, manualDiseaseInfo]);
 
   const getSelectedDiseasesForEye = useCallback((eyeKey) => {
     return Object.entries(manualDiagnosis?.[eyeKey] || {})
@@ -2795,7 +2802,8 @@ function App() {
                     if (!imgInfo) return null;
                     const typeOptions = ['--- Select ---', '右眼CFP', '左眼CFP', '右眼外眼照', '左眼外眼照'];
                     const defaultQualityOption = '图像质量高';
-                    const qualityOptions = [defaultQualityOption, '图像质量可用', '图像质量差', '--- Select ---'];
+                    const qualityOptions = [defaultQualityOption, '图像质量可用', '图像质量差'];
+                    const showQuality = imgInfo.type === '左眼CFP' || imgInfo.type === '右眼CFP';
                     return (
                       <div key={imgIndex} className="flex flex-col items-center gap-2 p-3 bg-gray-50 rounded-md border border-gray-200 flex-grow basis-0 min-w-[200px]">
                         <span className="font-medium text-gray-700 text-sm whitespace-nowrap">Image {imgIndex + 1}</span>
@@ -2809,19 +2817,31 @@ function App() {
                               <option key={option} value={option === '--- Select ---' ? '' : option}>{option}</option>
                             ))}
                           </select>
-                          <select
-                            value={imgInfo.quality || defaultQualityOption}
-                            onChange={(e) => handleImageDetailChange(imgInfo.id, 'quality', e.target.value)}
-                            className="p-2 border border-gray-300 rounded-md bg-white text-gray-700 text-xs md:text-sm flex-grow focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-150 shadow-sm"
-                          >
-                            {qualityOptions.map(option => (
-                              <option key={option} value={option === '--- Select ---' ? '' : option}>{option}</option>
-                            ))}
-                          </select>
                         </div>
-                    </div>
-                  );
-                })}
+                        {showQuality && (
+                          <div className="flex flex-wrap gap-2 w-full justify-center md:justify-start">
+                            {qualityOptions.map(option => {
+                              const selected = (imgInfo.quality || defaultQualityOption) === option;
+                              return (
+                                <button
+                                  key={option}
+                                  type="button"
+                                  onClick={() => handleImageDetailChange(imgInfo.id, 'quality', option)}
+                                  className={`px-2 py-1 rounded border text-xs md:text-sm transition ${
+                                    selected
+                                      ? 'border-blue-500 bg-blue-50 text-blue-700 font-semibold'
+                                      : 'border-gray-300 bg-white text-gray-700 hover:border-blue-400 hover:text-blue-600'
+                                  }`}
+                                >
+                                  {option}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
               {/* Manual Diagnosis Section */}
