@@ -63,7 +63,7 @@
     "priority": 110,
     "root": "../data_new",
     "diseases": [
-      { "key": "Healthy", "label_cn": "健康", "label_en": "Healthy", "short_name": "Healthy", "aliases": ["Healthy"], "is_normal": true },
+      { "key": "Healthy", "label_cn": "眼底未见明显异常", "label_en": "Normal Overall", "short_name": "Healthy", "aliases": ["Healthy"], "is_normal": true },
       { "key": "DR", "label_cn": "糖尿病视网膜病变", "label_en": "Diabetic Retinopathy", "short_name": "DR", "aliases": ["DR"] },
       { "key": "Glaucoma", "label_cn": "青光眼", "label_en": "Glaucoma", "short_name": "Glaucoma", "aliases": ["Glaucoma"] },
       { "key": "AMD", "label_cn": "年龄相关性黄斑变性", "label_en": "Age-related Macular Degeneration", "short_name": "AMD", "aliases": ["AMD"] },

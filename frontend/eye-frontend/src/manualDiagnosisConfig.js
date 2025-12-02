@@ -9,7 +9,7 @@ export const MANUAL_DISEASE_ORDER = [
   'RAO',
   '视网膜脱离',
   '白内障',
-  '正常',
+  '眼底未见明显异常',
 ];
 
 export const MANUAL_DISEASE_INFO = {
@@ -86,9 +86,9 @@ export const MANUAL_DISEASE_INFO = {
     shortName: 'Cataract',
   },
   正常: {
-    chinese: '正常',
+    chinese: '眼底未见明显异常',
     english: 'Normal',
-    fullName: '正常 (Normal)',
+    fullName: '眼底未见明显异常 (Normal)',
     shortName: 'Normal',
   },
 };
@@ -114,7 +114,7 @@ export const MANUAL_COMMON_PHRASES = {
   seperator: ', ',
   common_phrases: {
     青光眼: [
-      ['视盘色淡', '视盘线状出血'],
+      ['C/D大', 'RNFLD', '盘沿缺损', '视盘色淡', '视盘线状出血'],
     ],
     DR: [
       ['微动脉瘤', '出血', '硬性渗出', '棉绒斑', '静脉串珠样改变', 'IRMA', '新生血管'],
@@ -134,7 +134,7 @@ export const MANUAL_COMMON_PHRASES = {
       ['灰白色隆起', '视网膜裂孔', '视网膜皱褶', '无血管区'],
     ],
     病理性近视: [
-      ['豹纹状眼底', '视盘倾斜', '后极萎缩斑', '色素改变', '漆裂纹', '脉络膜新生血管'],
+      ['豹纹状眼底', '视盘倾斜', '后极萎缩斑', '色素改变', '漆裂纹', '脉络膜新生血管', '视盘萎缩弧'],
     ],
     豹纹状眼底: [
       ['豹纹状眼底', '视盘倾斜'],

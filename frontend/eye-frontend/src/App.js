@@ -329,9 +329,9 @@ const DEFAULT_DISEASE_INFO = {
     color: 'text-blue-600'
   },
   正常: {
-    chinese: '正常',
+    chinese: '眼底未见明显异常',
     english: 'Normal',
-    fullName: '正常 (Normal)',
+    fullName: '眼底未见明显异常 (Normal)',
     shortName: 'Normal',
     category: 'normal',
     color: 'text-green-600',
@@ -355,7 +355,7 @@ const CROSS_DISEASE_ALIAS_GROUPS = [
   ['其它黄斑病变', '其他黄斑病变', 'Other Macular Diseases', 'Other Macular'],
   ['其它眼底病变', '其他眼底病变', 'Other Fundus Diseases', 'Other Fundus'],
   ['白内障', 'Cataract'],
-  ['正常', 'Normal', 'Healthy']
+  ['正常', '眼底未见明显异常', 'Normal', 'Healthy']
 ];
 
 const buildDiseaseAliasMap = (diseases, seedMap = {}) => {
@@ -403,6 +403,26 @@ const buildDiseaseAliasMap = (diseases, seedMap = {}) => {
   });
 
   return aliasMap;
+};
+
+const canonicalizeDiseaseKey = (key, aliasMap) => {
+  if (!key) return key;
+  const lower = String(key).toLowerCase();
+  return aliasMap?.[key] || aliasMap?.[lower] || key;
+};
+
+const buildManualDiseaseOrder = (baseOrder, extraOrder, aliasMap) => {
+  const seen = new Set();
+  const ordered = [];
+  const push = (rawKey) => {
+    const canonical = canonicalizeDiseaseKey(rawKey, aliasMap);
+    if (!canonical || seen.has(canonical)) return;
+    seen.add(canonical);
+    ordered.push(canonical);
+  };
+  (Array.isArray(baseOrder) ? baseOrder : []).forEach(push);
+  (Array.isArray(extraOrder) ? extraOrder : []).forEach(push);
+  return ordered;
 };
 
 const normalizeManualDiagnosis = (rawManualDiagnosis, diseaseKeys, aliasMap) => {
@@ -1106,7 +1126,11 @@ function App() {
       const diseaseKeys = Array.isArray(normalizedResult?.diseases) && normalizedResult.diseases.length > 0
         ? normalizedResult.diseases.map((entry) => entry.key)
         : DEFAULT_DISEASE_ORDER;
-      const manualDiseaseKeys = MANUAL_DISEASE_ORDER.length ? MANUAL_DISEASE_ORDER : diseaseKeys;
+      const manualDiseaseKeys = buildManualDiseaseOrder(
+        MANUAL_DISEASE_ORDER,
+        diseaseKeys,
+        diseaseAliasMap
+      );
 
       const calculateScore = (prob, threshold) => {
         const t = typeof threshold === 'number' && threshold > 0 ? threshold : 0.5;
@@ -1679,9 +1703,14 @@ function App() {
     return buildDiseaseAliasMap(patientData?.diseases, patientData?.disease_alias_map);
   }, [patientData?.diseases, patientData?.disease_alias_map]);
 
+  const manualDiseaseOrder = useMemo(() => {
+    const extra = diseaseOrder.length ? diseaseOrder : DEFAULT_DISEASE_ORDER;
+    return buildManualDiseaseOrder(MANUAL_DISEASE_ORDER, extra, diseaseAliasMap);
+  }, [diseaseAliasMap, diseaseOrder]);
+
   const manualDiseaseInfo = useMemo(() => {
     const mapped = {};
-    MANUAL_DISEASE_ORDER.forEach((key) => {
+    manualDiseaseOrder.forEach((key) => {
       const entry = MANUAL_DISEASE_INFO[key] || {};
       const defaults = diseaseInfo[key] || {};
       mapped[key] = {
@@ -1692,11 +1721,7 @@ function App() {
       };
     });
     return mapped;
-  }, [diseaseInfo]);
-
-  const manualDiseaseOrder = useMemo(() => {
-    return MANUAL_DISEASE_ORDER.length ? MANUAL_DISEASE_ORDER : (diseaseOrder.length ? diseaseOrder : DEFAULT_DISEASE_ORDER);
-  }, [diseaseOrder]);
+  }, [diseaseInfo, manualDiseaseOrder]);
 
   useEffect(() => {
     if (!manualDiseaseOrder || manualDiseaseOrder.length === 0) return;
@@ -2009,8 +2034,14 @@ function App() {
     const imageUpdates = patientData.eye_images
       .map(currentImg => {
         const originalImg = originalPatientData.eye_images.find(img => img.id === currentImg.id);
-        if (originalImg && (currentImg.type !== originalImg.type || currentImg.quality !== originalImg.quality)) {
-          return { id: currentImg.id, type: currentImg.type, quality: currentImg.quality };
+        const typeChanged = originalImg && currentImg.type !== originalImg.type;
+        const qualityChanged = originalImg && currentImg.quality !== originalImg.quality;
+        if (typeChanged || qualityChanged) {
+          return { 
+            id: currentImg.id, 
+            type: currentImg.type, 
+            quality: currentImg.quality
+          };
         }
         return null;
       })
@@ -2070,6 +2101,18 @@ function App() {
 
       const result = await response.json();
       setSubmitMessage(result.status || 'Submission successful!');
+
+      // Keep local and original eye_images in sync with the submitted values to avoid UI snapping back
+      setPatientData((prev) => {
+        if (!prev) return prev;
+        const newEyeImages = prev.eye_images ? prev.eye_images.map((img) => ({ ...img })) : [];
+        const updated = {
+          ...prev,
+          eye_images: newEyeImages,
+          original: prev.original ? { ...prev.original, eye_images: newEyeImages.map((img) => ({ ...img })) } : prev.original
+        };
+        return updated;
+      });
 
       // Successfully submitted, so no more unsaved changes
       setHasUnsavedChanges(false);
@@ -2478,7 +2521,7 @@ function App() {
                           '较高': '高于阈值 / Above T',
                           '接近阈值': '接近阈值 / Near T',
                           '较低': '低于阈值 / Below T',
-                          '正常': '整体正常 / Normal overall'
+                          '正常': '眼底未见明显异常 / Normal overall'
                         };
                         return (
                           <div key={eyeKey} className="p-3 rounded-xl bg-white border border-indigo-200 shadow-sm">
@@ -2751,8 +2794,8 @@ function App() {
                     const imgInfo = getDisplayedImageInfo(imageId);
                     if (!imgInfo) return null;
                     const typeOptions = ['--- Select ---', '右眼CFP', '左眼CFP', '右眼外眼照', '左眼外眼照'];
-                    const defaultQualityOption = '图像质量可用';
-                    const qualityOptions = [defaultQualityOption, '图像质量高', '图像质量差', '--- Select ---'];
+                    const defaultQualityOption = '图像质量高';
+                    const qualityOptions = [defaultQualityOption, '图像质量可用', '图像质量差', '--- Select ---'];
                     return (
                       <div key={imgIndex} className="flex flex-col items-center gap-2 p-3 bg-gray-50 rounded-md border border-gray-200 flex-grow basis-0 min-w-[200px]">
                         <span className="font-medium text-gray-700 text-sm whitespace-nowrap">Image {imgIndex + 1}</span>
@@ -2776,9 +2819,9 @@ function App() {
                             ))}
                           </select>
                         </div>
-                      </div>
-                    );
-                  })}
+                    </div>
+                  );
+                })}
                 </div>
               </div>
               {/* Manual Diagnosis Section */}

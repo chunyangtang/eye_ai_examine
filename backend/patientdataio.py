@@ -117,7 +117,7 @@ def _build_patient_data_from_payload(
     exam_date: Optional[str] = None,
 ) -> PatientData:
     """Transform a preloaded patient payload into a PatientData object."""
-    default_image_quality = ""
+    default_image_quality = "图像质量高"
     disease_entries = model_cfg.get("diseases") or []
     disease_keys = [entry.get("key") for entry in disease_entries if entry.get("key")]
     alias_map = model_cfg.get("disease_alias_map", {})
@@ -148,12 +148,14 @@ def _build_patient_data_from_payload(
             full_path = img_rel
         else:
             full_path = os.path.join(base_dir, img_rel)
+        abs_full_path = os.path.abspath(full_path)
         base64_data = read_image(full_path)
         eye_images.append(ImageInfo(
-            id=f"img_{patient_id}_{img.get('img_path', '')}",
+            id=abs_full_path,
             type=img_type,
             quality=img_quality,
-            base64_data=base64_data or ""
+            base64_data=base64_data or "",
+            eye_side=img_type or None
         ))
 
     # Process prediction results
@@ -250,7 +252,7 @@ def load_batch_patient_data(model_cfg: Dict[str, Any], data_path=None) -> List[P
             data_path = os.path.normpath(os.path.join(os.path.dirname(__file__), data_path_env))
         else:
             data_path = data_path_env
-    default_image_quality = ""
+    default_image_quality = "图像质量高"
     diagnosis_mapping = {
         "青光眼": "青光眼",
         "糖尿病性视网膜病变": "糖网",
@@ -319,18 +321,20 @@ def create_single_dummy_patient_data() -> PatientData:
     # --- Images ---
     eye_images: List[ImageInfo] = []
     image_types = ['左眼CFP', '右眼CFP', '左眼外眼照', '右眼外眼照']
-    image_qualities = ['图像质量高', '图像质量可用', '图像质量差', '']
+    image_qualities = ['图像质量高', '图像质量可用', '图像质量差']
     colors = [(random.randint(0,255), random.randint(0,255), random.randint(0,255)) for _ in range(6)]
     for i in range(6):  # fixed number for predictable UI density; adjust if needed
         img_type = random.choice(image_types)
         img_quality = random.choice(image_qualities)
         img_color = colors[i]
         base64_data = generate_random_image_base64(f"{img_type}\nQ:{img_quality}\nImg {i+1}", img_color)
+        abs_dummy_path = os.path.abspath(os.path.join("/tmp", f"{patient_id}_{i}.png"))
         eye_images.append(ImageInfo(
-            id=f"img_{patient_id}_{i}",
+            id=abs_dummy_path,
             type=img_type,
             quality=img_quality,
-            base64_data=base64_data
+            base64_data=base64_data,
+            eye_side=img_type
         ))
 
     # --- Random Predictions ---

@@ -5,8 +5,9 @@ from typing import List, Dict, Optional, Any
 class ImageInfo(BaseModel):
     id: str
     type: str  # i.e., '左眼CFP', '右眼CFP', '左眼外眼照', '右眼外眼照'
-    quality: str # i.e., '图像质量高', '图像质量可用', '图像质量差'
-    base64_data: str # Base64 encoded image
+    quality: str  # i.e., '图像质量高', '图像质量可用', '图像质量差'
+    base64_data: str  # Base64 encoded image
+    eye_side: Optional[str] = None  # Recorded eye side/type selection
 
 
 # Separate threshold for cataract when using external-eye (外眼) predictions
@@ -37,6 +38,8 @@ class ManualDiagnosisData(BaseModel):
     diagnosis_notes: str = ""
     doctor_id: Optional[str] = None
     manual_descriptions: Optional[Dict[str, str]] = None
+    image_quality: Optional[Dict[str, str]] = None
+    eye_side: Optional[Dict[str, str]] = None
 
 
 class PatientData(BaseModel):
@@ -59,7 +62,7 @@ class PatientData(BaseModel):
 class SubmitDiagnosisRequest(BaseModel):
     patient_id: str
     exam_date: Optional[str] = None  # Optional exam date (YYYYMMDD format)
-    image_updates: Optional[List[Dict[str, str]]] = None  # Only id, type, quality
+    image_updates: Optional[List[Dict[str, Any]]] = None  # id, type, quality, eye_side
     # Manual diagnosis data - accept raw dicts for flexibility
     manual_diagnosis: Optional[Dict[str, Dict[str, bool]]] = None
     custom_diseases: Optional[CustomDiseases] = None

@@ -616,6 +616,10 @@ def _preload_manual_diagnoses() -> None:
                 stored = ManualDiagnosisData(**payload)
                 if getattr(stored, "manual_descriptions", None) is None:
                     stored.manual_descriptions = {"left_eye": "", "right_eye": ""}
+                if getattr(stored, "image_quality", None) is None:
+                    stored.image_quality = {}
+                if getattr(stored, "eye_side", None) is None:
+                    stored.eye_side = {}
                 manual_diagnosis_storage[cache_key] = stored
                 logger.debug(f"Loaded manual diagnosis for {cache_key}")
             except Exception:
@@ -626,10 +630,16 @@ def _preload_manual_diagnoses() -> None:
                         custom_diseases=payload.get("custom_diseases") or CustomDiseases(),
                         diagnosis_notes=payload.get("diagnosis_notes", ""),
                         doctor_id=payload.get("doctor_id"),
-                        manual_descriptions=payload.get("manual_descriptions")
+                        manual_descriptions=payload.get("manual_descriptions"),
+                        image_quality=payload.get("image_quality") or {},
+                        eye_side=payload.get("eye_side") or payload.get("eye_side_mismatch") or {}
                     )
                     if getattr(stored, "manual_descriptions", None) is None:
                         stored.manual_descriptions = {"left_eye": "", "right_eye": ""}
+                    if getattr(stored, "image_quality", None) is None:
+                        stored.image_quality = {}
+                    if getattr(stored, "eye_side", None) is None:
+                        stored.eye_side = {}
                     manual_diagnosis_storage[cache_key] = stored
                     logger.debug(f"Loaded manual diagnosis for {cache_key} (with fallback)")
                 except Exception as inner_exc:
@@ -1003,6 +1013,32 @@ def _parse_ts_from_imgpath(p: str) -> int:
     except Exception:
         return 0
 
+
+def _apply_manual_image_overrides(patient, patient_id: str, exam_date: Optional[str]) -> None:
+    """
+    Apply stored manual image quality/eye_side overrides to the given patient object.
+    """
+    cache_key = f"{patient_id}_{exam_date}" if exam_date else patient_id
+    md = manual_diagnosis_storage.get(cache_key)
+    if not md and not exam_date:
+        md = manual_diagnosis_storage.get(patient_id)
+    if not md:
+        return
+    try:
+        quality_map = getattr(md, "image_quality", {}) or {}
+        side_map = getattr(md, "eye_side", {}) or {}
+        for img in getattr(patient, "eye_images", []):
+            img_id = getattr(img, "id", None)
+            if not img_id:
+                continue
+            if img_id in quality_map:
+                img.quality = quality_map[img_id]
+            if img_id in side_map and side_map[img_id]:
+                img.type = side_map[img_id]
+                img.eye_side = side_map[img_id]
+    except Exception:
+        pass
+
 def _warm_raw_cache_from_raw_json(model_id: str, ris_exam_id: str, exam_date: Optional[str] = None) -> None:
     """Build raw_probs_cache[...] from aggregated inference records."""
     record = get_inference_record(ris_exam_id, exam_date, model_id=model_id)
@@ -1087,6 +1123,7 @@ async def get_patient_by_id(ris_exam_id: str, exam_date: Optional[str] = None, m
                 raise KeyError
             base_dir = get_inference_base_dir(ris_exam_id, exam_date, model_id=resolved_model_id) or model_cfg.get("abs_root") or RAW_JSON_ROOT
             patient_data = load_patient_from_record(ris_exam_id, record, base_dir, model_cfg, exam_date=exam_date)
+            _apply_manual_image_overrides(patient_data, ris_exam_id, exam_date)
             # Cache the loaded data with composite key
             patients_data_cache[cache_key] = patient_data
             # Build raw prob cache for this patient (warm for reselection)
@@ -1276,9 +1313,10 @@ async def submit_diagnosis(request: SubmitDiagnosisRequest):
         disease_keys = [entry.get("key") for entry in getattr(patient, "diseases", []) if isinstance(entry, dict) and entry.get("key")]
         disease_key_set = set(disease_keys)
         alias_map = getattr(patient, "disease_alias_map", {}) or MODEL_CONFIGS.get(resolved_model_id, {}).get("disease_alias_map", {})
+        storage_key: Optional[str] = None
         
-        # Store manual diagnosis data
-        if request.manual_diagnosis or request.custom_diseases or request.diagnosis_notes or request.manual_descriptions:
+        # Store manual diagnosis data (also capture image quality/side info even if only image updates were sent)
+        if request.manual_diagnosis or request.custom_diseases or request.diagnosis_notes or request.manual_descriptions or request.image_updates:
             # Convert raw dict to ManualEyeDiagnosis objects
             processed_manual_diagnosis = {}
             if request.manual_diagnosis:
@@ -1298,6 +1336,19 @@ async def submit_diagnosis(request: SubmitDiagnosisRequest):
                     else:
                         processed_manual_diagnosis[eye_key] = eye_data
             
+            image_quality_map: Dict[str, str] = {}
+            eye_side_map: Dict[str, str] = {}
+            for img in getattr(patient, "eye_images", []):
+                try:
+                    img_id = getattr(img, "id", None)
+                    if not img_id:
+                        continue
+                    # Use absolute path identifiers for persisted maps
+                    image_quality_map[img_id] = getattr(img, "quality", None) or "图像质量高"
+                    eye_side_map[img_id] = getattr(img, "eye_side", None) or getattr(img, "type", None) or ""
+                except Exception:
+                    continue
+
             manual_data = ManualDiagnosisData(
                 manual_diagnosis=processed_manual_diagnosis,
                 custom_diseases=request.custom_diseases or CustomDiseases(),
@@ -1306,49 +1357,62 @@ async def submit_diagnosis(request: SubmitDiagnosisRequest):
                 manual_descriptions=request.manual_descriptions or {
                     "left_eye": "",
                     "right_eye": ""
-                }
+                },
+                image_quality=image_quality_map or None,
+                eye_side=eye_side_map or None
             )
             
-            # Store in memory with composite key
+            # Store in memory with composite key (persist later after any image updates/refresh)
             storage_key = f"{request.patient_id}_{exam_date}"
             manual_diagnosis_storage[storage_key] = manual_data
-            
-            # Persist to disk with new structure
-            with manual_diagnosis_file_lock:
-                persisted = _load_manual_diagnosis_store()
-                try:
-                    payload = manual_data.dict()
-                except Exception:
-                    payload = {
-                        "manual_diagnosis": manual_data.manual_diagnosis,
-                        "custom_diseases": getattr(manual_data, "custom_diseases", {}),
-                        "diagnosis_notes": getattr(manual_data, "diagnosis_notes", ""),
-                        "doctor_id": getattr(manual_data, "doctor_id", None),
-                        "manual_descriptions": getattr(manual_data, "manual_descriptions", {})
-                    }
-                
-                # Ensure patient_id entry exists
-                if request.patient_id not in persisted:
-                    persisted[request.patient_id] = {}
-                
-                # Store under exam_date
-                persisted[request.patient_id][exam_date] = payload
-                _save_manual_diagnosis_store(persisted)
-                
-            print(f"Manual diagnosis data stored for patient: {request.patient_id}, exam_date: {exam_date}")
-            print(f"Storage key: {storage_key}")
-            print(f"Manual diagnosis: {manual_data.manual_diagnosis}")
-            print(f"Custom diseases: {manual_data.custom_diseases}")
-            print(f"Diagnosis notes: {manual_data.diagnosis_notes}")
         
         # Update image type/quality if provided
         if request.image_updates:
             for update_img in request.image_updates:
                 for img in patient.eye_images:
                     if img.id == update_img["id"]:
-                        img.type = update_img["type"]
-                        img.quality = update_img["quality"]
+                        img.type = update_img.get("type", img.type)
+                        img.eye_side = update_img.get("type", img.eye_side or img.type)
+                        if "quality" in update_img:
+                            img.quality = update_img["quality"]
             print(f"Image info updated for {request.patient_id}")
+
+        # Refresh stored image quality/side info after possible updates
+        if storage_key and storage_key in manual_diagnosis_storage:
+            refreshed_quality: Dict[str, str] = {}
+            refreshed_side: Dict[str, str] = {}
+            for img in getattr(patient, "eye_images", []):
+                try:
+                    img_id = getattr(img, "id", None)
+                    if not img_id:
+                        continue
+                    refreshed_quality[img_id] = getattr(img, "quality", None) or "图像质量高"
+                    refreshed_side[img_id] = getattr(img, "eye_side", None) or getattr(img, "type", None) or ""
+                except Exception:
+                    continue
+            manual_diagnosis_storage[storage_key].image_quality = refreshed_quality
+            manual_diagnosis_storage[storage_key].eye_side = refreshed_side
+
+            # Persist to disk with refreshed data
+            with manual_diagnosis_file_lock:
+                persisted = _load_manual_diagnosis_store()
+                try:
+                    payload = manual_diagnosis_storage[storage_key].dict()
+                except Exception:
+                    payload = {
+                        "manual_diagnosis": manual_diagnosis_storage[storage_key].manual_diagnosis,
+                        "custom_diseases": getattr(manual_diagnosis_storage[storage_key], "custom_diseases", {}),
+                        "diagnosis_notes": getattr(manual_diagnosis_storage[storage_key], "diagnosis_notes", ""),
+                        "doctor_id": getattr(manual_diagnosis_storage[storage_key], "doctor_id", None),
+                        "manual_descriptions": getattr(manual_diagnosis_storage[storage_key], "manual_descriptions", {}),
+                        "image_quality": getattr(manual_diagnosis_storage[storage_key], "image_quality", {}),
+                        "eye_side": getattr(manual_diagnosis_storage[storage_key], "eye_side", {})
+                    }
+
+                if request.patient_id not in persisted:
+                    persisted[request.patient_id] = {}
+                persisted[request.patient_id][exam_date] = payload
+                _save_manual_diagnosis_store(persisted)
         
         return {"status": "Manual diagnosis and image info submitted successfully!", "exam_date": exam_date}
 
@@ -1512,6 +1576,10 @@ async def get_manual_diagnosis(ris_exam_id: str, exam_date: Optional[str] = None
             if manual_data:
                 if getattr(manual_data, "manual_descriptions", None) is None:
                     manual_data.manual_descriptions = {"left_eye": "", "right_eye": ""}
+                if getattr(manual_data, "image_quality", None) is None:
+                    manual_data.image_quality = {}
+                if getattr(manual_data, "eye_side", None) is None:
+                    manual_data.eye_side = {}
                 return manual_data
         
         # Try without exam_date (backward compatibility)
@@ -1519,6 +1587,10 @@ async def get_manual_diagnosis(ris_exam_id: str, exam_date: Optional[str] = None
         if manual_data:
             if getattr(manual_data, "manual_descriptions", None) is None:
                 manual_data.manual_descriptions = {"left_eye": "", "right_eye": ""}
+            if getattr(manual_data, "image_quality", None) is None:
+                manual_data.image_quality = {}
+            if getattr(manual_data, "eye_side", None) is None:
+                manual_data.eye_side = {}
             return manual_data
         
         # If no exam_date provided, try to find any exam for this patient
@@ -1529,6 +1601,10 @@ async def get_manual_diagnosis(ris_exam_id: str, exam_date: Optional[str] = None
                     logger.info(f"Found manual diagnosis for {key}")
                     if getattr(data, "manual_descriptions", None) is None:
                         data.manual_descriptions = {"left_eye": "", "right_eye": ""}
+                    if getattr(data, "image_quality", None) is None:
+                        data.image_quality = {}
+                    if getattr(data, "eye_side", None) is None:
+                        data.eye_side = {}
                     return data
         
         # Return empty structure if no manual diagnosis exists yet
@@ -1538,7 +1614,9 @@ async def get_manual_diagnosis(ris_exam_id: str, exam_date: Optional[str] = None
             custom_diseases=CustomDiseases(),
             diagnosis_notes="",
             doctor_id=None,
-            manual_descriptions={"left_eye": "", "right_eye": ""}
+            manual_descriptions={"left_eye": "", "right_eye": ""},
+            image_quality={},
+            eye_side={}
         )
 
 @app.get("/api/manual_diagnoses")
